@@ -1,7 +1,7 @@
 name = "CombinatorialMultigrid"
 uuid = "44808c39-7784-4d8d-8dbc-3ef853c709a1"
 authors = [
-  "Bodhisatta Pramanik <bodhi91@iastate.edu>",
+  "Bodhisatta Pramanik <bopramanik@ucsd.edu>",
   "Yiannis Koutis <i.koutis@gmail.com>",
 ]
 version = "0.2.0"
