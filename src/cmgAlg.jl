@@ -27,6 +27,9 @@ Base.@kwdef mutable struct HierarchyLevel
     nnz::Int64
     #chol::CholT
     chol::LDLFactorizations.LDLFactorization{Float64,Int64,Int64,Int64}
+    # full coarse matrix on the terminal direct level, where A holds only the
+    # trimmed (n-1)x(n-1) block; empty on every other level
+    A_full::SparseMatrixCSC{Float64,Int64} = spzeros(0, 0)
 end
 
 Base.@kwdef struct Hierarchy
@@ -108,16 +111,45 @@ end
 
 ##
 
-function cmg_preconditioner_lap(A_lap::SparseMatrixCSC)
+"""
+    (pfunc, H) = cmg_preconditioner_lap(A_lap; cycle=:vcycle, theta=0.75, inner_tol=0.25)
+
+Build the CMG hierarchy for the Laplacian (or SDD matrix) `A_lap` and return a
+preconditioner function `pfunc` together with the hierarchy `H`.
+
+With the default `cycle = :vcycle`, `pfunc` is the legacy stationary cycle — a
+fixed linear operator, safe to use inside a standard PCG such as
+`Laplacians.pcgSolver`. With `cycle = :kcycle`, `pfunc` applies one K-cycle
+sweep (inner flexible-CG acceleration at the coarse levels, controlled by
+`theta` and `inner_tol` — see `cmg_solve`). The K-cycle operator is
+*nonlinear*: it must NOT be passed as a preconditioner to `pcgSolver` or any
+standard CG. Use `cmg_solve`, whose flexible-CG outer loop supports it.
+
+Either closure shares internal workspace across calls and is not reentrant or
+thread-safe.
+"""
+function cmg_preconditioner_lap(
+    A_lap::SparseMatrixCSC;
+    cycle::Symbol = :vcycle,
+    theta::Float64 = 0.75,
+    inner_tol::Float64 = 0.25,
+)
     local A_lap_ = validateInput!(A_lap)  # throws if not valid
-    cmg_!(A_lap, A_lap_)
+    if cycle === :vcycle
+        return cmg_!(A_lap, A_lap_)
+    elseif cycle === :kcycle
+        local H = build_hierarchy(A_lap, A_lap_)
+        return (make_kcycle_preconditioner(H, theta, inner_tol), H)
+    else
+        throw(ArgumentError("unknown cycle $(repr(cycle)); use :vcycle or :kcycle"))
+    end
 end
 
-function cmg_preconditioner_adj(A::SparseMatrixCSC)
-    cmg_preconditioner_lap(lap(A))
+function cmg_preconditioner_adj(A::SparseMatrixCSC; kwargs...)
+    cmg_preconditioner_lap(lap(A); kwargs...)
 end
 
-function cmg_!(A::T, A_::T) where {T<:SparseMatrixCSC}
+function build_hierarchy(A::T, A_::T)::Vector{HierarchyLevel} where {T<:SparseMatrixCSC}
     local original_nnz = nnz(A)
     local H = Vector{HierarchyLevel}()
     local sflag::Bool = true
@@ -133,7 +165,9 @@ function cmg_!(A::T, A_::T) where {T<:SparseMatrixCSC}
             push!(
                 H,
                 HierarchyLevel(
-                    sd = true,
+                    # keep the true augmentation flag when this is the top
+                    # level; deeper levels always have sd = true by this point
+                    sd = isempty(H) ? sd : true,
                     islast = true,
                     iterative = false,
                     A = B,
@@ -143,6 +177,7 @@ function cmg_!(A::T, A_::T) where {T<:SparseMatrixCSC}
                     n = n,
                     nnz = nnz(ldlt.L),
                     chol = ldlt,
+                    A_full = A_,
                 ),
             )
             break
@@ -187,6 +222,12 @@ function cmg_!(A::T, A_::T) where {T<:SparseMatrixCSC}
             break
         end
     end
+
+    return H
+end
+
+function cmg_!(A::T, A_::T) where {T<:SparseMatrixCSC}
+    local H = build_hierarchy(A, A_)
 
     X = init_LevelAux(H)
     W = init_Workspace(H)
@@ -264,10 +305,10 @@ function validateInput!(A::SparseMatrixCSC)::SparseMatrixCSC
 
     # augment by extra coordinate if strictly dominant
     if maximum(sd) > 0.0
-        local ex_v = -sAp[sd]
+        local exd_c = findall(!iszero, sd) #nonzeros(sd) # get coordinates
+        local ex_v = -sAp[exd_c]
         local ex_v_sum = -sum(ex_v)
         local exd = length(ex_v)
-        local exd_c = findall(!iszero, sd) #nonzeros(sd) # get coordinates
         local i_ = ones(Int64, exd) * (n + 1)
         local i = vcat(i, i_, exd_c, n + 1)
         local j = vcat(j, exd_c, i_, n + 1)
@@ -580,7 +621,11 @@ function preconditioner_i(
         cI = H[level].cI
 
         if X[level].islast && !X[level].iterative
+            # chol factors the trimmed system; ldiv! writes only the first
+            # n-1 coordinates, so pin the grounded one to 0 (Laplacian null
+            # space) instead of leaving b's copied-through value there
             @inbounds ldiv!(x, H[level].chol, b)
+            x[end] = 0.0
             level -= 1
         elseif X[level].islast && X[level].iterative
             W[level].x .= b .* invD

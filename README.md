@@ -72,6 +72,58 @@ PCG stopped after: 10.288 seconds and 26 iterations with relative error 9.697886
 
 ```CMG``` builds the preconditioner in ```3.26 seconds``` compared to ```26.31 seconds``` with ```approxchol_lap```. Solving the system takes ```7.8 seconds``` with ```cmg``` and ```10.29 seconds``` with ```approxchol_lap```.
 
+## K-cycle solver (optional)
+
+The package also provides a **K-cycle** variant of the CMG preconditioner: the
+stationary repeats of the classic cycle are replaced by a few inner
+flexible-CG (Krylov) iterations at each coarse level, preconditioned by the
+recursive K-cycle below. On anisotropic and high-contrast problems this
+typically reduces both iterations and wall time. The legacy cycle remains the
+default everywhere; the K-cycle is selected explicitly.
+
+The simplest entry point is the new solver `cmg_solve`, which wraps a
+flexible-CG outer loop around the CMG hierarchy:
+
+```julia
+(x, stats) = cmg_solve(LX, b)                     # K-cycle by default
+(x, stats) = cmg_solve(LX, b; cycle = :vcycle)    # classic cycle (plain PCG)
+stats.iterations, stats.relres, stats.converged
+```
+
+To reuse a hierarchy across right-hand sides, build it once and pass it in:
+
+```julia
+(pfunc, h) = cmg_preconditioner_lap(LX);          # legacy default, unchanged
+(x, stats) = cmg_solve(h, b);                     # K-cycle solve on the same hierarchy
+```
+
+Knobs of `cmg_solve`:
+
+| keyword | default | meaning |
+|---|---|---|
+| `cycle` | `:kcycle` | `:kcycle` or `:vcycle` (stationary legacy cycle) |
+| `tol` | `1e-8` | relative residual tolerance |
+| `maxit` | `500` | maximum outer iterations |
+| `theta` | `0.75` | work-budget cap for the inner iterations; `0.0` opts out into fixed local repeats |
+| `inner_tol` | `0.25` | adaptive early-stopping for the inner FCG; `0.0` disables |
+| `collect_stats` | `false` | record per-level K-cycle visit counts in `stats.level_visits` |
+
+A single K-cycle application is also available from the preconditioner
+constructors via a knob:
+
+```julia
+(pfunc_k, h) = cmg_preconditioner_lap(LX; cycle = :kcycle);
+x ≈ pfunc_k(b)   # one K-cycle sweep
+```
+
+> **Warning.** The K-cycle operator is *nonlinear* (it runs inner Krylov
+> iterations), so `pfunc_k` must **not** be passed as a preconditioner to
+> `Laplacians.pcgSolver` or any other standard PCG — use `cmg_solve`, whose
+> flexible-CG outer loop supports it. The default (`cycle = :vcycle`)
+> preconditioner remains a fixed linear operator and stays PCG-safe.
+
+`example/bench_kcycle.jl` compares the two cycles on uniform and anisotropic
+grids.
 
 **Citations:**
 

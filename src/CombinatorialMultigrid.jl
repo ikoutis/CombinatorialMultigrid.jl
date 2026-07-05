@@ -5,5 +5,6 @@ using LDLFactorizations
 using Laplacians
 
 include("cmgAlg.jl")
-export cmg_preconditioner_adj, cmg_preconditioner_lap
+include("kcycle.jl")
+export cmg_preconditioner_adj, cmg_preconditioner_lap, cmg_solve, CMGStats
 end
