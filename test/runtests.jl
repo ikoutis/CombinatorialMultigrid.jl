@@ -43,6 +43,42 @@ end
 
 relres(A, x, b) = norm(A * x - b) / norm(b)
 
+# random weighted spanning-tree adjacency on n nodes (connected)
+function random_tree_adj(n::Int)
+    local I = Int64[]
+    local J = Int64[]
+    local V = Float64[]
+    for v = 2:n
+        local p = rand(1:v-1)
+        local w = rand() + 0.5
+        push!(I, v); push!(J, p); push!(V, w)
+        push!(I, p); push!(J, v); push!(V, w)
+    end
+    return sparse(I, J, V, n, n)
+end
+
+# spanning tree plus `k` extra random (off-tree) edges
+function tree_plus_offtree_adj(n::Int, k::Int)
+    local A = random_tree_adj(n)
+    local extra = Set{Tuple{Int64,Int64}}()
+    while length(extra) < k
+        local i = rand(1:n)
+        local j = rand(1:n)
+        if i != j
+            push!(extra, (min(i, j), max(i, j)))
+        end
+    end
+    local I = Int64[]
+    local J = Int64[]
+    local V = Float64[]
+    for (i, j) in extra
+        local w = rand() + 0.5
+        push!(I, i); push!(J, j); push!(V, w)
+        push!(I, j); push!(J, i); push!(V, w)
+    end
+    return A + sparse(I, J, V, n, n)
+end
+
 const CMG = CombinatorialMultigrid
 
 @testset "CombinatorialMultigrid" begin
@@ -218,6 +254,93 @@ const CMG = CombinatorialMultigrid
         local (x2, stats2) = cmg_solve(Hk, b)
         @test stats2.converged
         @test relres(A, x2, b) < 1e-6
+    end
+
+    @testset "degree-1/2 elimination: pure tree (exact)" begin
+        Random.seed!(10)
+        for n in (16, 300)
+            local L = lap(random_tree_adj(n))
+            @test maximum(abs.(sum(L, dims = 2))) < 1e-10
+            # a pure tree collapses to the single null-space node
+            local elims, ind, A_red, is_lap = CMG.eliminate_deg12(L)
+            @test is_lap
+            @test length(ind) == 1
+            @test length(elims) == n - 1
+
+            local b = randn(n)
+            b .-= sum(b) / n
+            for cycle in (:vcycle, :kcycle)
+                local (pfunc, EH) = cmg_preconditioner_lap(L; cycle = cycle, eliminate = true)
+                @test EH isa EliminatedHierarchy
+                @test isempty(EH.H)                       # no CMG needed
+                local (x, stats) = cmg_solve(EH, b; cycle = cycle)
+                @test stats.converged
+                @test relres(L, x, b) < 1e-8              # elimination alone is exact
+            end
+        end
+    end
+
+    @testset "degree-1/2 elimination: near-tree Laplacian (both cycles)" begin
+        Random.seed!(11)
+        for (n, k) in ((200, 10), (700, 30))
+            local A = tree_plus_offtree_adj(n, k)
+            local L = lap(A)
+            local elims, ind, A_red, is_lap = CMG.eliminate_deg12(L)
+            @test length(ind) < n                          # meaningful reduction
+            @test size(A_red, 1) == length(ind)
+            @test issymmetric(A_red)
+
+            local b = randn(n)
+            b .-= sum(b) / n
+            for cycle in (:vcycle, :kcycle)
+                # eliminate vs plain must agree
+                local (_, EH) = cmg_preconditioner_lap(L; cycle = cycle, eliminate = true)
+                local (xe, se) = cmg_solve(EH, b; cycle = cycle, tol = 1e-10)
+                local (xp, sp) = cmg_solve(L, b; cycle = cycle, tol = 1e-10)
+                @test se.converged
+                @test relres(L, xe, b) < 1e-6
+                # both are valid solutions of a singular system; compare residuals
+                @test relres(L, xe, b) <= relres(L, xp, b) * 10 + 1e-8
+            end
+        end
+    end
+
+    @testset "degree-1/2 elimination: SDD near-tree" begin
+        Random.seed!(12)
+        local n = 300
+        local L = lap(tree_plus_offtree_adj(n, 12))
+        local A = L + 0.1 * sparse(1.0I, n, n)             # strictly dominant (SDD)
+        local elims, ind, A_red, is_lap = CMG.eliminate_deg12(A)
+        @test !is_lap
+        local b = randn(n)
+        local x_ref = Matrix(A) \ b
+        for cycle in (:vcycle, :kcycle)
+            local (pfunc, EH) = cmg_preconditioner_lap(A; cycle = cycle, eliminate = true)
+            local (x, stats) = cmg_solve(EH, b; cycle = cycle, tol = 1e-10)
+            @test stats.converged
+            @test norm(x - x_ref) / norm(x_ref) < 1e-6
+            # returned preconditioner closure is usable and finite
+            local xp = pfunc(b)
+            @test length(xp) == n
+            @test all(isfinite, xp)
+        end
+    end
+
+    @testset "degree-1/2 elimination: grid core + API guards" begin
+        Random.seed!(13)
+        local A = grid2_sdd(30, 30)                        # interior nodes stay degree >= 3
+        local n = size(A, 1)
+        local b = randn(n)
+        local x_ref = Matrix(A) \ b
+        local elims, ind, A_red, is_lap = CMG.eliminate_deg12(A)
+        @test length(ind) >= 1
+        local (_, EH) = cmg_preconditioner_lap(A; cycle = :kcycle, eliminate = true)
+        local (x, stats) = cmg_solve(EH, b; cycle = :kcycle, tol = 1e-10)
+        @test stats.converged
+        @test norm(x - x_ref) / norm(x_ref) < 1e-6
+
+        @test_throws ArgumentError cmg_solve(EH, b; cycle = :wcycle)
+        @test_throws DimensionMismatch cmg_solve(EH, randn(n + 3))
     end
 
 end
