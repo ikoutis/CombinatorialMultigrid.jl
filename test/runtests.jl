@@ -467,7 +467,9 @@ const CMG = CombinatorialMultigrid
         end
 
         # invalid input errors match the non-elimination path
-        local Asym = sparse([1, 2], [2, 1], [1.0, 2.0], 2, 2) + 3.0 * sparse(1.0I, 2, 2)
+        # (explicit triplets: `I` is shadowed by the local triplet vector in
+        # this testset, so `1.0I` would not be the identity here)
+        local Asym = sparse([1, 1, 2, 2], [1, 2, 1, 2], [3.0, -1.0, -2.0, 3.0], 2, 2)
         @test_throws ArgumentError cmg_preconditioner_lap(Asym; eliminate = true)
         local Apos = sparse([1, 2, 1, 2], [1, 2, 2, 1], [2.0, 2.0, 0.5, 0.5], 2, 2)
         @test_throws ArgumentError cmg_preconditioner_lap(Apos; eliminate = true)
