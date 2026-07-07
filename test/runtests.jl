@@ -343,6 +343,76 @@ const CMG = CombinatorialMultigrid
         @test_throws DimensionMismatch cmg_solve(EH, randn(n + 3))
     end
 
+    @testset "degree-1/2 elimination: fill-merge structures" begin
+        # structures that exercise fill edges landing on existing or previously
+        # created edges (duplicate-neighbor summation in the elimination): pure
+        # cycles, theta graphs (two hubs joined by several disjoint paths), and
+        # a square with one diagonal. All collapse fully -> exact solve.
+        Random.seed!(14)
+
+        # pure cycles: every node degree 2; fills cascade into parallel edges
+        for n in (3, 4, 10, 101)
+            local I = Int64[]; local J = Int64[]; local V = Float64[]
+            for i = 1:n
+                local j = i == n ? 1 : i + 1
+                local w = rand() + 0.5
+                push!(I, i); push!(J, j); push!(V, w)
+                push!(I, j); push!(J, i); push!(V, w)
+            end
+            local L = lap(sparse(I, J, V, n, n))
+            local elims, ind, A_red, is_lap = CMG.eliminate_deg12(L)
+            @test is_lap
+            @test length(ind) == 1                 # cycle collapses fully
+            @test length(elims) == n - 1
+            local b = randn(n); b .-= sum(b) / n
+            local (_, EH) = cmg_preconditioner_lap(L; eliminate = true)
+            local (x, stats) = cmg_solve(EH, b)
+            @test stats.converged
+            @test relres(L, x, b) < 1e-8           # exact by elimination alone
+        end
+
+        # theta graph: hubs 1 and 2 joined by `npath` disjoint paths of length
+        # `plen` (path collapse fills merge into parallel hub-hub edges)
+        for (npath, plen) in ((3, 5), (5, 1), (2, 30))
+            local I = Int64[]; local J = Int64[]; local V = Float64[]
+            local nid = 2
+            for _ = 1:npath
+                local prev = 1
+                for _ = 1:plen
+                    nid += 1
+                    local w = rand() + 0.5
+                    push!(I, prev); push!(J, nid); push!(V, w)
+                    push!(I, nid); push!(J, prev); push!(V, w)
+                    prev = nid
+                end
+                local w = rand() + 0.5
+                push!(I, prev); push!(J, 2); push!(V, w)
+                push!(I, 2); push!(J, prev); push!(V, w)
+            end
+            local n = nid
+            local L = lap(sparse(I, J, V, n, n))
+            local elims, ind, _, _ = CMG.eliminate_deg12(L)
+            @test length(ind) == 1                 # theta collapses fully
+            local b = randn(n); b .-= sum(b) / n
+            local (_, EH) = cmg_preconditioner_lap(L; eliminate = true)
+            local (x, stats) = cmg_solve(EH, b)
+            @test stats.converged
+            @test relres(L, x, b) < 1e-8
+        end
+
+        # square + one diagonal: eliminating a corner fills exactly onto the
+        # existing diagonal edge (duplicate summation on the base slice)
+        local I = [1, 2, 2, 3, 3, 4, 4, 1, 1, 3]
+        local J = [2, 1, 3, 2, 4, 3, 1, 4, 3, 1]
+        local V = [1.3, 1.3, 0.7, 0.7, 1.1, 1.1, 0.9, 0.9, 2.0, 2.0]
+        local L = lap(sparse(I, J, V, 4, 4))
+        local b = randn(4); b .-= sum(b) / 4
+        local (_, EH) = cmg_preconditioner_lap(L; eliminate = true)
+        local (x, stats) = cmg_solve(EH, b)
+        @test stats.converged
+        @test relres(L, x, b) < 1e-10
+    end
+
 end
 
 # optional timing script on the large example matrix (requires MAT.jl and
