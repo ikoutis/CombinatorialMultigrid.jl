@@ -454,36 +454,6 @@ function fcg_solve!(
         mul!(q, A, p)
         local pq = dot(p, q)
         if pq <= 0.0
-            # FCG breakdown: roundoff produced a nonpositive-curvature search
-            # direction. This shows up when the preconditioner is nearly exact
-            # and the residual already sits at its accuracy floor (e.g. an
-            # ill-conditioned core solved by a single direct level). The
-            # freshly computed d = P(r) is still a valid stationary step, so
-            # salvage with a few guarded iterative-refinement sweeps
-            # x += P(r); each sweep commits only if it reduces the residual
-            # (r_prev is free as a trial buffer — we exit the loop after this).
-            for sweep = 1:3
-                if sweep > 1
-                    if use_kcycle
-                        kcycle!(d, H, W, 1, r, krepeat, inner_tol, visits)
-                    else
-                        copyto!(d, preconditioner_i(Hs, Wv, Xv, r))
-                    end
-                end
-                mul!(q, A, d)
-                r_prev .= r .- q
-                local rnew = norm(r_prev)
-                if rnew >= rnorm
-                    break  # refinement stopped helping; keep the last good x
-                end
-                copyto!(r, r_prev)
-                x .+= d
-                rnorm = rnew
-                iterations += 1
-                if rnorm <= tol * bnorm
-                    break
-                end
-            end
             break  # breakdown guard
         end
 

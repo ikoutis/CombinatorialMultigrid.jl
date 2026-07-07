@@ -413,40 +413,6 @@ const CMG = CombinatorialMultigrid
         @test relres(L, x, b) < 1e-10
     end
 
-    @testset "breakdown refinement (ill-conditioned core)" begin
-        # near-tree whose edge weights span ten orders of magnitude: the
-        # reduced core is ill-conditioned, so a (near-)exact preconditioner
-        # leaves the FCG residual at its accuracy floor and the pq <= 0
-        # breakdown guard fires (the Spielman_k300 failure mode). The guarded
-        # iterative-refinement sweeps must still deliver a converged solve.
-        Random.seed!(15)
-        local n = 4000
-        local I = Int64[]; local J = Int64[]; local V = Float64[]
-        for v = 2:n
-            local p = rand(1:v-1)
-            local w = 10.0^rand(-5:5) * (rand() + 0.5)
-            push!(I, v); push!(J, p); push!(V, w)
-            push!(I, p); push!(J, v); push!(V, w)
-        end
-        for _ = 1:12
-            local i = rand(1:n)
-            local j = rand(1:n)
-            if i != j
-                local w = 10.0^rand(-5:5) * (rand() + 0.5)
-                push!(I, i); push!(J, j); push!(V, w)
-                push!(I, j); push!(J, i); push!(V, w)
-            end
-        end
-        local L = lap(sparse(I, J, V, n, n))
-        local b = randn(n); b .-= sum(b) / n
-        for cycle in (:kcycle, :vcycle)
-            local (_, EH) = cmg_preconditioner_lap(L; cycle = cycle, eliminate = true)
-            local (x, stats) = cmg_solve(EH, b; cycle = cycle, tol = 1e-8, maxit = 200)
-            @test stats.converged
-            @test relres(L, x, b) < 1e-6
-        end
-    end
-
 end
 
 # optional timing script on the large example matrix (requires MAT.jl and
