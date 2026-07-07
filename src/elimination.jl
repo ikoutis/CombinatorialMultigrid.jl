@@ -15,18 +15,25 @@
 ## from a spanning tree to an arbitrary graph.
 
 """
-    ElimRecord
+    ElimSequence
 
-One eliminated node `node`, its neighbors `nbrs` with edge weights `ws` (matrix
-entry `A[node, nbrs[k]] = -ws[k]`), and the pivot `piv = A[node, node]` at the
-moment of elimination. Records are stored in elimination order.
+The elimination records in pooled (CSR-style) storage: entry `t` eliminated
+`node[t]` on pivot `piv[t]`, with neighbors `nbrs[ptr[t]:ptr[t+1]-1]` and edge
+weights `ws[...]` (matrix entry `A[node[t], nbrs[a]] = -ws[a]`) at elimination
+time, in elimination order. Flat pools avoid per-record allocation and make the
+forward/back substitution walk contiguous memory.
 """
-struct ElimRecord
-    node::Int64
+struct ElimSequence
+    node::Vector{Int64}
+    piv::Vector{Float64}
+    ptr::Vector{Int64}      # length(node) + 1 offsets into nbrs/ws
     nbrs::Vector{Int64}
     ws::Vector{Float64}
-    piv::Float64
 end
+
+ElimSequence() = ElimSequence(Int64[], Float64[], Int64[1], Int64[], Float64[])
+
+Base.length(seq::ElimSequence) = length(seq.node)
 
 """
     EliminatedHierarchy
@@ -36,7 +43,7 @@ the CMG hierarchy built on the reduced (surviving) matrix. Produced by
 `cmg_preconditioner_lap(A; eliminate = true)` and consumed by
 `cmg_solve(::EliminatedHierarchy, b; ...)`.
 
-- `elims`: elimination records, in order.
+- `elims`: pooled elimination records, in order.
 - `ind`  : original indices of the surviving nodes (sorted increasing).
 - `n`    : original problem size.
 - `H`    : CMG hierarchy on the reduced matrix; empty when the reduced system is
@@ -46,7 +53,7 @@ the CMG hierarchy built on the reduced (surviving) matrix. Produced by
             for a strictly diagonally dominant (SDD) matrix.
 """
 struct EliminatedHierarchy
-    elims::Vector{ElimRecord}
+    elims::ElimSequence
     ind::Vector{Int64}
     n::Int64
     H::Vector{HierarchyLevel}
@@ -58,9 +65,12 @@ end
     elims, ind, A_red, is_lap = eliminate_deg12(A)
 
 Exactly eliminate all degree-1 and degree-2 nodes of the Laplacian/SDD matrix
-`A` by repeated Schur complementation. Returns the elimination records, the
-surviving node indices, the reduced matrix `A_red = Schur(A)[ind, ind]`, and
-whether `A` is a pure Laplacian.
+`A` by repeated Schur complementation. Returns the pooled elimination records,
+the surviving node indices, the reduced matrix `A_red = Schur(A)[ind, ind]`,
+and whether `A` is a pure Laplacian. Requires a symmetric matrix with
+non-positive off-diagonals; a positive off-diagonal throws the same
+`ArgumentError` as `validateInput!` (symmetry is checked by the caller,
+`build_eliminated_hierarchy`).
 
 A node `v` of degree `deg in {1, 2}` is eliminated on pivot `p = A[v,v]`; for
 every ordered neighbor pair `(i, j)` (including `i == j`) the update is
@@ -69,54 +79,83 @@ diagonals and, for `deg == 2`, a single fill edge of weight `w_i*w_j/p` between
 the neighbors (the classical series/harmonic rule). Degree-0 nodes are never
 eligible, so the Laplacian null-space node (pivot 0) always survives.
 
-Implementation: array-based with amortized-linear total work (no per-node
-hash maps). The base adjacency is read in place from the CSC structure; edge
-deletion is lazy (`alive` checks at scan time); fill edges go to per-node
-spill vectors. `deg` is a *lower bound* on the live-distinct degree — it is
-decremented when a neighbor is eliminated but never incremented by fill, so a
-popped candidate is first *compacted* (dead entries dropped, duplicate
-neighbors summed via an epoch-stamped sparse accumulator) and its exact degree
-re-checked; a stale pop is a cheap skip, never a wrong elimination. Compaction
-replaces the node's adjacency with the deduped form, so every adjacency cell
-is scanned O(1) times overall. The elimination *order* can differ from other
-strategies, but the eliminated set, the survivors, and the Schur complement
-are order-independent.
+Implementation: array-based, no per-node hash maps and no per-record
+allocation. The base adjacency is read in place from the CSC structure; edge
+deletion is lazy (`alive` checks at scan time); fill edges go to per-node spill
+vectors. `deg` is a *lower bound* on the live-distinct degree — decremented
+when a neighbor is eliminated, never incremented by fill — so a popped
+candidate is first *compacted* into reused scratch buffers (dead entries
+dropped, duplicate neighbors summed via an epoch-stamped sparse accumulator)
+and its exact degree re-checked; a stale pop is a cheap skip, never a wrong
+elimination. Eliminated nodes append their scratch to the record pools and
+store no adjacency; surviving candidates keep the compacted form.
+
+Total scanning work is amortized `O(n + m)`: an individual live spill entry can
+be rescanned across repeated compactions of the same node, but per pop the
+scanned cells split into dead cells (each discarded forever at the compaction
+that sees it), at most `2 + deaths-since-last-compaction` live cells (the bound
+is reset to the exact degree at each compaction and only neighbor deaths
+decrement it, and a pop requires the bound to be at most 2), and
+fills-since-last-compaction — and deaths, fills, and pops are each globally
+`O(n + m)`, so the sum telescopes. The elimination *order* can differ from
+other strategies, but the eliminated set, the survivors, and the Schur
+complement are order-independent.
 """
 function eliminate_deg12(A::SparseMatrixCSC)
     local n = size(A, 1)
-    local d = Vector{Float64}(diag(A))
-
-    # pure Laplacian (all row sums ~ 0) vs strictly dominant (SDD)
-    local rowsum = vec(sum(A, dims = 1))
-    local maxdiag = n == 0 ? 1.0 : maximum(d)
-    local is_lap = n == 0 ? true : maximum(abs, rowsum) <= 1e-13 * max(1.0, maxdiag)
-
     local rows = rowvals(A)
     local vals = nonzeros(A)
+
+    # single-pass setup: diagonal, row sums (Laplacian detection), lower-bound
+    # degrees, and the positive-off-diagonal check (same error as validateInput!)
+    local d = zeros(Float64, n)
+    local deg = zeros(Int64, n)
+    local maxabsrowsum = 0.0
+    local maxdiag = 0.0
+    @inbounds for j = 1:n
+        local s = 0.0
+        local c = 0
+        for r in nzrange(A, j)
+            local v = vals[r]
+            s += v
+            if rows[r] == j
+                d[j] = v
+            else
+                if v > 0
+                    throw(
+                        ArgumentError(
+                            "Current Version of CMG Does Not Support Positive Off-Diagonals!",
+                        ),
+                    )
+                end
+                c += 1
+            end
+        end
+        deg[j] = c
+        maxabsrowsum = max(maxabsrowsum, abs(s))
+        maxdiag = max(maxdiag, d[j])
+    end
+    local is_lap = n == 0 ? true : maxabsrowsum <= 1e-13 * max(1.0, maxdiag)
 
     local alive = fill(true, n)
     local base_live = fill(true, n)                    # base CSC slice not yet consumed
     local spill_nbr = Vector{Vector{Int64}}(undef, n)  # fill edges / compacted adjacency
     local spill_w = Vector{Vector{Float64}}(undef, n)
 
-    # lower-bound live-distinct degree = stored off-diagonal count per column
-    local deg = zeros(Int64, n)
-    @inbounds for j = 1:n
-        local c = 0
-        for r in nzrange(A, j)
-            if rows[r] != j
-                c += 1
-            end
-        end
-        deg[j] = c
-    end
-
-    # sparse-accumulator scratch for compaction
+    # sparse-accumulator scratch for compaction, plus the reused output buffers
     local mark = zeros(Int64, n)
     local slot = zeros(Int64, n)
     local epoch = Ref(zero(Int64))
+    local sc_nbrs = Int64[]
+    local sc_ws = Float64[]
 
-    local elims = ElimRecord[]
+    # pooled elimination records
+    local seq = ElimSequence()
+    sizehint!(seq.node, n)
+    sizehint!(seq.piv, n)
+    sizehint!(seq.ptr, n + 1)
+    sizehint!(seq.nbrs, 2 * n)
+    sizehint!(seq.ws, 2 * n)
 
     # LIFO worklist of candidate degree-1/2 nodes (order does not affect
     # exactness; forward/back use the recorded elimination order)
@@ -133,29 +172,42 @@ function eliminate_deg12(A::SparseMatrixCSC)
         local v = pop!(stack)
         inq[v] = false
         alive[v] || continue
-        local nbrs, ws = compact_adjacency!(
-            v, A, rows, vals, base_live, spill_nbr, spill_w, alive, deg, mark, slot, epoch)
-        local dv = length(nbrs)
-        # exact-degree check: deg-0 (ground) survives; a stale lower bound is a skip
-        (dv == 1 || dv == 2) || continue
+        compact_into_scratch!(
+            sc_nbrs, sc_ws, v, A, rows, vals, base_live, spill_nbr, spill_w,
+            alive, mark, slot, epoch)
+        local dv = length(sc_nbrs)
+        if dv == 0 || dv > 2
+            # ground node or stale lower bound: keep the compacted adjacency
+            spill_nbr[v] = copy(sc_nbrs)
+            spill_w[v] = copy(sc_ws)
+            deg[v] = dv
+            continue
+        end
 
         local p = d[v]
-        push!(elims, ElimRecord(v, nbrs, ws, p))
+        push!(seq.node, v)
+        push!(seq.piv, p)
+        append!(seq.nbrs, sc_nbrs)
+        append!(seq.ws, sc_ws)
+        push!(seq.ptr, length(seq.nbrs) + 1)
         alive[v] = false
+        # eliminated nodes are never scanned again; store no adjacency
+        deg[v] = 0
 
         # Schur diagonal corrections on the neighbors
         for a = 1:dv
-            d[nbrs[a]] -= ws[a]^2 / p
+            d[sc_nbrs[a]] -= sc_ws[a]^2 / p
         end
         # single fill / series edge between the two neighbors of a degree-2 node
         if dv == 2
-            local f = ws[1] * ws[2] / p
-            push_fill!(spill_nbr, spill_w, nbrs[1], nbrs[2], f)
-            push_fill!(spill_nbr, spill_w, nbrs[2], nbrs[1], f)
+            local f = sc_ws[1] * sc_ws[2] / p
+            push_fill!(spill_nbr, spill_w, sc_nbrs[1], sc_nbrs[2], f)
+            push_fill!(spill_nbr, spill_w, sc_nbrs[2], sc_nbrs[1], f)
         end
 
         # neighbors lost a distinct live neighbor; enqueue new candidates
-        for k in nbrs
+        for a = 1:dv
+            local k = sc_nbrs[a]
             deg[k] -= 1
             if alive[k] && deg[k] <= 2 && !inq[k]
                 push!(stack, k)
@@ -171,35 +223,50 @@ function eliminate_deg12(A::SparseMatrixCSC)
         pos[ind[r]] = r
     end
 
-    # rebuild the reduced matrix from compacted survivors
-    local I = Int64[]
-    local J = Int64[]
-    local V = Float64[]
-    for orig in ind
-        local nbrs, ws = compact_adjacency!(
-            orig, A, rows, vals, base_live, spill_nbr, spill_w, alive, deg, mark, slot, epoch)
-        local r = pos[orig]
-        push!(I, r)
-        push!(J, r)
-        push!(V, d[orig])
-        for a = 1:length(nbrs)
-            push!(I, r)
-            push!(J, pos[nbrs[a]])
-            push!(V, -ws[a])
+    # rebuild the reduced matrix: compact all survivors first so the triplet
+    # arrays can be filled at their exact final size
+    local surv_nbr = Vector{Vector{Int64}}(undef, m)
+    local surv_w = Vector{Vector{Float64}}(undef, m)
+    local nnz_red = m
+    for r = 1:m
+        compact_into_scratch!(
+            sc_nbrs, sc_ws, ind[r], A, rows, vals, base_live, spill_nbr, spill_w,
+            alive, mark, slot, epoch)
+        surv_nbr[r] = copy(sc_nbrs)
+        surv_w[r] = copy(sc_ws)
+        nnz_red += length(sc_nbrs)
+    end
+    local I = Vector{Int64}(undef, nnz_red)
+    local J = Vector{Int64}(undef, nnz_red)
+    local V = Vector{Float64}(undef, nnz_red)
+    local t = 0
+    @inbounds for r = 1:m
+        t += 1
+        I[t] = r
+        J[t] = r
+        V[t] = d[ind[r]]
+        local nb = surv_nbr[r]
+        local wv = surv_w[r]
+        for a = 1:length(nb)
+            t += 1
+            I[t] = r
+            J[t] = pos[nb[a]]
+            V[t] = -wv[a]
         end
     end
     local A_red = sparse(I, J, V, m, m)
 
-    return elims, ind, A_red, is_lap
+    return seq, ind, A_red, is_lap
 end
 
-# Dedupe the live adjacency of `v` (base CSC slice + spill), summing duplicate
-# neighbors with the epoch-stamped sparse accumulator, and store the compacted
-# form back (base slice consumed, spill := compacted). Returns `(nbrs, ws)` —
-# the same vectors that now back the node's adjacency; an eliminated node hands
-# them to its ElimRecord (it is dead, so the aliasing is harmless), and fills
-# arriving later are appended after them.
-function compact_adjacency!(
+# Dedupe the live adjacency of `v` (base CSC slice + spill) into the reused
+# scratch buffers, summing duplicate neighbors with the epoch-stamped sparse
+# accumulator, and consume the base slice. The caller decides what to do with
+# the scratch: append it to the record pools (elimination) or copy it into the
+# node's spill vectors (survivor).
+function compact_into_scratch!(
+    sc_nbrs::Vector{Int64},
+    sc_ws::Vector{Float64},
     v::Int64,
     A::SparseMatrixCSC,
     rows::AbstractVector,
@@ -208,26 +275,25 @@ function compact_adjacency!(
     spill_nbr::Vector{Vector{Int64}},
     spill_w::Vector{Vector{Float64}},
     alive::Vector{Bool},
-    deg::Vector{Int64},
     mark::Vector{Int64},
     slot::Vector{Int64},
     epoch::Base.RefValue{Int64},
 )
     epoch[] += 1
     local e = epoch[]
-    local nbrs = Int64[]
-    local ws = Float64[]
+    empty!(sc_nbrs)
+    empty!(sc_ws)
     @inbounds if base_live[v]
         for r in nzrange(A, v)
             local k = Int64(rows[r])
             (k == v || !alive[k]) && continue
             if mark[k] != e
                 mark[k] = e
-                push!(nbrs, k)
-                push!(ws, -Float64(vals[r]))
-                slot[k] = length(nbrs)
+                push!(sc_nbrs, k)
+                push!(sc_ws, -Float64(vals[r]))
+                slot[k] = length(sc_nbrs)
             else
-                ws[slot[k]] -= Float64(vals[r])
+                sc_ws[slot[k]] -= Float64(vals[r])
             end
         end
     end
@@ -239,19 +305,16 @@ function compact_adjacency!(
             alive[k] || continue
             if mark[k] != e
                 mark[k] = e
-                push!(nbrs, k)
-                push!(ws, sw[a])
-                slot[k] = length(nbrs)
+                push!(sc_nbrs, k)
+                push!(sc_ws, sw[a])
+                slot[k] = length(sc_nbrs)
             else
-                ws[slot[k]] += sw[a]
+                sc_ws[slot[k]] += sw[a]
             end
         end
     end
     base_live[v] = false
-    spill_nbr[v] = nbrs
-    spill_w[v] = ws
-    deg[v] = length(nbrs)
-    return nbrs, ws
+    return nothing
 end
 
 @inline function push_fill!(
@@ -274,36 +337,48 @@ end
     EH = build_eliminated_hierarchy(A_lap)
 
 Run `eliminate_deg12` on `A_lap` and build a CMG hierarchy on the reduced matrix
-(when it has at least two nodes). Returns an `EliminatedHierarchy`.
+(when it has at least two nodes). Returns an `EliminatedHierarchy`. Throws the
+same `ArgumentError`s as the non-elimination path for an asymmetric matrix or a
+positive off-diagonal.
 """
 function build_eliminated_hierarchy(A_lap::SparseMatrixCSC)::EliminatedHierarchy
+    if !issymmetric(A_lap)
+        throw(ArgumentError("Input Matrix Must Be Symmetric!"))
+    end
     local n = size(A_lap, 1)
     local elims, ind, A_red, is_lap = eliminate_deg12(A_lap)
     local H = HierarchyLevel[]
     if length(ind) >= 2
-        local A_red_ = validateInput!(A_red)   # reuses SDD augmentation, throws on positive off-diagonals
+        local A_red_ = validateInput!(A_red)   # reuses SDD augmentation
         H = build_hierarchy(A_red, A_red_)
     end
     return EliminatedHierarchy(elims, ind, n, H, A_red, is_lap)
 end
 
 """
-    y = forward_elim(b, elims)
+    forward_elim!(y, b, elims)
 
-Forward substitution of the partial Cholesky: fold each eliminated variable's
-right-hand side into its neighbors, in elimination order.
+Forward substitution of the partial Cholesky into the preallocated buffer `y`
+(overwritten with a copy of `b`, then updated in place): fold each eliminated
+variable's right-hand side into its neighbors, in elimination order.
 """
-function forward_elim(b::AbstractVector, elims::Vector{ElimRecord})
-    local y = Vector{Float64}(b)
-    @inbounds for e in elims
-        local yv = y[e.node]
-        local p = e.piv
-        for k = 1:length(e.nbrs)
-            y[e.nbrs[k]] += (e.ws[k] / p) * yv
+function forward_elim!(y::Vector{Float64}, b::AbstractVector, elims::ElimSequence)
+    copyto!(y, b)
+    local ptr = elims.ptr
+    local nbrs = elims.nbrs
+    local ws = elims.ws
+    @inbounds for t = 1:length(elims)
+        local yv = y[elims.node[t]]
+        local p = elims.piv[t]
+        for a = ptr[t]:(ptr[t+1]-1)
+            y[nbrs[a]] += (ws[a] / p) * yv
         end
     end
     return y
 end
+
+forward_elim(b::AbstractVector, elims::ElimSequence) =
+    forward_elim!(Vector{Float64}(undef, length(b)), b, elims)
 
 """
     back_elim!(x, y, elims)
@@ -311,14 +386,16 @@ end
 Back substitution of the partial Cholesky: recover each eliminated variable from
 its neighbors (already solved), in reverse elimination order.
 """
-function back_elim!(x::Vector{Float64}, y::Vector{Float64}, elims::Vector{ElimRecord})
-    @inbounds for idx = length(elims):-1:1
-        local e = elims[idx]
-        local s = y[e.node]
-        for k = 1:length(e.nbrs)
-            s += e.ws[k] * x[e.nbrs[k]]
+function back_elim!(x::Vector{Float64}, y::Vector{Float64}, elims::ElimSequence)
+    local ptr = elims.ptr
+    local nbrs = elims.nbrs
+    local ws = elims.ws
+    @inbounds for t = length(elims):-1:1
+        local s = y[elims.node[t]]
+        for a = ptr[t]:(ptr[t+1]-1)
+            s += ws[a] * x[nbrs[a]]
         end
-        x[e.node] = s / e.piv
+        x[elims.node[t]] = s / elims.piv[t]
     end
     return x
 end
@@ -330,7 +407,9 @@ Wrap the reduced-system preconditioner with the exact forward/back substitution
 so the returned closure applies one full compressed CMG cycle on the original
 coordinates. With `cycle = :vcycle` the closure is a fixed linear operator (safe
 in a standard PCG); with `cycle = :kcycle` it is nonlinear and must be driven by
-`cmg_solve`.
+`cmg_solve`. The closure shares internal workspace across calls (the returned
+vector is a reused buffer, like CMG's other preconditioner closures) and is not
+reentrant or thread-safe.
 """
 function make_eliminated_preconditioner(
     EH::EliminatedHierarchy,
@@ -342,15 +421,21 @@ function make_eliminated_preconditioner(
         throw(ArgumentError("unknown cycle $(repr(cycle)); use :vcycle or :kcycle"))
     end
 
+    local m = length(EH.ind)
     local inner::Function
     if isempty(EH.H)
-        if isempty(EH.ind)
+        if m == 0
             inner = b_red -> Float64[]
         elseif EH.is_lap
-            inner = b_red -> [0.0]                       # Laplacian null-space reference
+            local zref = [0.0]
+            inner = b_red -> zref                        # Laplacian null-space reference
         else
             local dred = EH.A_red[1, 1]
-            inner = b_red -> [b_red[1] / dred]
+            local xred1 = [0.0]
+            inner = b_red -> begin
+                xred1[1] = b_red[1] / dred
+                xred1
+            end
         end
     elseif cycle === :vcycle
         local X = init_LevelAux(EH.H)
@@ -361,12 +446,19 @@ function make_eliminated_preconditioner(
         inner = make_kcycle_preconditioner(EH.H, theta, inner_tol)
     end
 
+    # closure-held workspace: forward buffer, solution buffer, reduced rhs
+    local y = zeros(Float64, EH.n)
+    local x = zeros(Float64, EH.n)
+    local b_red = zeros(Float64, m)
+
     return function (b)
-        local y = forward_elim(b, EH.elims)
-        local x = zeros(Float64, EH.n)
-        if !isempty(EH.ind)
-            local x_red = inner(Vector{Float64}(y[EH.ind]))
-            @inbounds for r = 1:length(EH.ind)
+        forward_elim!(y, b, EH.elims)
+        @inbounds for r = 1:m
+            b_red[r] = y[EH.ind[r]]
+        end
+        if m > 0
+            local x_red = inner(b_red)
+            @inbounds for r = 1:m
                 x[EH.ind[r]] = x_red[r]
             end
         end

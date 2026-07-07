@@ -413,6 +413,86 @@ const CMG = CombinatorialMultigrid
         @test relres(L, x, b) < 1e-10
     end
 
+    @testset "degree-1/2 elimination: hub-fill stress + invalid input" begin
+        Random.seed!(16)
+
+        # broom: one hub with many chains hanging off it (pure leaf cascades)
+        local I = Int64[]; local J = Int64[]; local V = Float64[]
+        local nid = 1
+        for _ = 1:50
+            local prev = 1
+            for _ = 1:8
+                nid += 1
+                local w = rand() + 0.5
+                push!(I, prev); push!(J, nid); push!(V, w)
+                push!(I, nid); push!(J, prev); push!(V, w)
+                prev = nid
+            end
+        end
+        local Lb = lap(sparse(I, J, V, nid, nid))
+        local bb = randn(nid); bb .-= sum(bb) / nid
+        local (_, EHb) = cmg_preconditioner_lap(Lb; eliminate = true)
+        local (xb, sb) = cmg_solve(EHb, bb)
+        @test sb.converged
+        @test relres(Lb, xb, bb) < 1e-8
+
+        # subdivided clique: K5 whose every edge is a 7-node path — chain
+        # collapses repeatedly fill onto the same five hubs (stale-candidate
+        # compactions); the survivors must be exactly the clique core
+        I = Int64[]; J = Int64[]; V = Float64[]
+        nid = 5
+        for a = 1:5, c = (a+1):5
+            local prev = a
+            for _ = 1:7
+                nid += 1
+                local w = rand() + 0.5
+                push!(I, prev); push!(J, nid); push!(V, w)
+                push!(I, nid); push!(J, prev); push!(V, w)
+                prev = nid
+            end
+            local w = rand() + 0.5
+            push!(I, prev); push!(J, c); push!(V, w)
+            push!(I, c); push!(J, prev); push!(V, w)
+        end
+        local Lk = lap(sparse(I, J, V, nid, nid))
+        local elims, ind, A_red, is_lap = CMG.eliminate_deg12(Lk)
+        @test ind == [1, 2, 3, 4, 5]
+        @test length(elims) == nid - 5
+        local bk = randn(nid); bk .-= sum(bk) / nid
+        for cycle in (:vcycle, :kcycle)
+            local (_, EHk) = cmg_preconditioner_lap(Lk; cycle = cycle, eliminate = true)
+            local (xk, sk) = cmg_solve(EHk, bk; cycle = cycle)
+            @test sk.converged
+            @test relres(Lk, xk, bk) < 1e-8
+        end
+
+        # invalid input errors match the non-elimination path
+        local Asym = sparse([1, 2], [2, 1], [1.0, 2.0], 2, 2) + 3.0 * sparse(1.0I, 2, 2)
+        @test_throws ArgumentError cmg_preconditioner_lap(Asym; eliminate = true)
+        local Apos = sparse([1, 2, 1, 2], [1, 2, 2, 1], [2.0, 2.0, 0.5, 0.5], 2, 2)
+        @test_throws ArgumentError cmg_preconditioner_lap(Apos; eliminate = true)
+    end
+
+    @testset "eliminated preconditioner closure reuse" begin
+        # the closure shares workspace across calls (documented non-reentrant);
+        # repeated applies must keep working and the V-cycle variant must be
+        # PCG-safe end to end
+        Random.seed!(17)
+        local A = lap(tree_plus_offtree_adj(3000, 20))
+        local n = size(A, 1)
+        local (pfunc, EH) = cmg_preconditioner_lap(A; cycle = :vcycle, eliminate = true)
+        local b1 = randn(n); b1 .-= sum(b1) / n
+        local b2 = randn(n); b2 .-= sum(b2) / n
+        local x1 = copy(pfunc(b1))          # copy: the closure reuses its buffer
+        local x2 = copy(pfunc(b2))
+        local x1_again = copy(pfunc(b1))
+        @test x1 == x1_again                # deterministic under buffer reuse
+        @test any(x1 .!= x2)
+        local f = pcgSolver(A, pfunc)
+        local xs = f(b1, maxits = 300, tol = 1e-8)
+        @test relres(A, xs, b1) < 1e-6
+    end
+
 end
 
 # optional timing script on the large example matrix (requires MAT.jl and
