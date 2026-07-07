@@ -314,6 +314,71 @@ function cmg_solve(A::SparseMatrixCSC, b::AbstractVector{<:Real}; kwargs...)
     cmg_solve(build_hierarchy(A, A_), b; kwargs...)
 end
 
+"""
+    (x, stats) = cmg_solve(EH::EliminatedHierarchy, b; tol, maxit, cycle, theta, inner_tol, collect_stats)
+
+Solve `A x = b` where `EH` was produced by
+`cmg_preconditioner_lap(A; eliminate = true)`. Applies the exact partial-Cholesky
+forward substitution, solves the reduced core system with CMG (or directly when
+the core has <= 1 node — the near-tree fast path), scatters, then back-substitutes
+the eliminated variables. `stats` come from the reduced solve (all-zero when the
+core is solved directly).
+"""
+function cmg_solve(
+    EH::EliminatedHierarchy,
+    b::AbstractVector{<:Real};
+    tol::Float64 = 1e-8,
+    maxit::Int64 = 500,
+    cycle::Symbol = :kcycle,
+    theta::Float64 = 0.75,
+    inner_tol::Float64 = 0.25,
+    collect_stats::Bool = false,
+)
+    if cycle !== :kcycle && cycle !== :vcycle
+        throw(ArgumentError("unknown cycle $(repr(cycle)); use :kcycle or :vcycle"))
+    end
+    if length(b) != EH.n
+        throw(DimensionMismatch("length(b) = $(length(b)), expected $(EH.n)"))
+    end
+
+    local y = forward_elim(b, EH.elims)
+    local x = zeros(Float64, EH.n)
+    local m = length(EH.ind)
+    local stats::CMGStats
+
+    if m == 0
+        # everything was eliminated; the solution is fully determined below
+        stats = CMGStats(0, 0.0, true, Int64[])
+    elseif m == 1
+        # tiny reduced system solved directly (near-tree fast path)
+        if EH.is_lap
+            x[EH.ind[1]] = 0.0                       # Laplacian null-space reference
+        else
+            x[EH.ind[1]] = y[EH.ind[1]] / EH.A_red[1, 1]
+        end
+        stats = CMGStats(0, 0.0, true, Int64[])
+    else
+        local b_red = Vector{Float64}(y[EH.ind])
+        local x_red, st = cmg_solve(
+            EH.H,
+            b_red;
+            tol = tol,
+            maxit = maxit,
+            cycle = cycle,
+            theta = theta,
+            inner_tol = inner_tol,
+            collect_stats = collect_stats,
+        )
+        @inbounds for r = 1:m
+            x[EH.ind[r]] = x_red[r]
+        end
+        stats = st
+    end
+
+    back_elim!(x, y, EH.elims)
+    return (x, stats)
+end
+
 function fcg_solve!(
     H::Vector{HierarchyLevel},
     b_sys::Vector{Float64},

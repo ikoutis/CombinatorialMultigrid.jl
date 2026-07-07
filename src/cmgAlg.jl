@@ -112,7 +112,7 @@ end
 ##
 
 """
-    (pfunc, H) = cmg_preconditioner_lap(A_lap; cycle=:vcycle, theta=0.75, inner_tol=0.25)
+    (pfunc, H) = cmg_preconditioner_lap(A_lap; cycle=:vcycle, theta=0.75, inner_tol=0.25, eliminate=false)
 
 Build the CMG hierarchy for the Laplacian (or SDD matrix) `A_lap` and return a
 preconditioner function `pfunc` together with the hierarchy `H`.
@@ -125,6 +125,13 @@ sweep (inner flexible-CG acceleration at the coarse levels, controlled by
 *nonlinear*: it must NOT be passed as a preconditioner to `pcgSolver` or any
 standard CG. Use `cmg_solve`, whose flexible-CG outer loop supports it.
 
+With `eliminate = true`, degree-1 and degree-2 nodes are first exactly factored
+out by a partial Cholesky (Schur complement), and CMG is built on the smaller
+surviving "core" matrix. In this mode the second return value is an
+`EliminatedHierarchy` (not a `Vector{HierarchyLevel}`); pass it to `cmg_solve`,
+which applies the exact forward/back-substitution around the reduced solve. The
+default `eliminate = false` leaves every existing code path unchanged.
+
 Either closure shares internal workspace across calls and is not reentrant or
 thread-safe.
 """
@@ -133,7 +140,12 @@ function cmg_preconditioner_lap(
     cycle::Symbol = :vcycle,
     theta::Float64 = 0.75,
     inner_tol::Float64 = 0.25,
+    eliminate::Bool = false,
 )
+    if eliminate
+        local EH = build_eliminated_hierarchy(A_lap)
+        return (make_eliminated_preconditioner(EH, cycle, theta, inner_tol), EH)
+    end
     local A_lap_ = validateInput!(A_lap)  # throws if not valid
     if cycle === :vcycle
         return cmg_!(A_lap, A_lap_)
