@@ -68,6 +68,19 @@ every ordered neighbor pair `(i, j)` (including `i == j`) the update is
 diagonals and, for `deg == 2`, a single fill edge of weight `w_i*w_j/p` between
 the neighbors (the classical series/harmonic rule). Degree-0 nodes are never
 eligible, so the Laplacian null-space node (pivot 0) always survives.
+
+Implementation: array-based with amortized-linear total work (no per-node
+hash maps). The base adjacency is read in place from the CSC structure; edge
+deletion is lazy (`alive` checks at scan time); fill edges go to per-node
+spill vectors. `deg` is a *lower bound* on the live-distinct degree — it is
+decremented when a neighbor is eliminated but never incremented by fill, so a
+popped candidate is first *compacted* (dead entries dropped, duplicate
+neighbors summed via an epoch-stamped sparse accumulator) and its exact degree
+re-checked; a stale pop is a cheap skip, never a wrong elimination. Compaction
+replaces the node's adjacency with the deduped form, so every adjacency cell
+is scanned O(1) times overall. The elimination *order* can differ from other
+strategies, but the eliminated set, the survivors, and the Schur complement
+are order-independent.
 """
 function eliminate_deg12(A::SparseMatrixCSC)
     local n = size(A, 1)
@@ -78,29 +91,39 @@ function eliminate_deg12(A::SparseMatrixCSC)
     local maxdiag = n == 0 ? 1.0 : maximum(d)
     local is_lap = n == 0 ? true : maximum(abs, rowsum) <= 1e-13 * max(1.0, maxdiag)
 
-    # adjacency of positive edge weights: A[i,j] = -w_ij for i != j
-    local adj = [Dict{Int64,Float64}() for _ = 1:n]
     local rows = rowvals(A)
     local vals = nonzeros(A)
+
+    local alive = fill(true, n)
+    local base_live = fill(true, n)                    # base CSC slice not yet consumed
+    local spill_nbr = Vector{Vector{Int64}}(undef, n)  # fill edges / compacted adjacency
+    local spill_w = Vector{Vector{Float64}}(undef, n)
+
+    # lower-bound live-distinct degree = stored off-diagonal count per column
+    local deg = zeros(Int64, n)
     @inbounds for j = 1:n
+        local c = 0
         for r in nzrange(A, j)
-            local i = rows[r]
-            if i != j
-                adj[i][j] = -vals[r]
+            if rows[r] != j
+                c += 1
             end
         end
+        deg[j] = c
     end
 
-    local alive = trues(n)
+    # sparse-accumulator scratch for compaction
+    local mark = zeros(Int64, n)
+    local slot = zeros(Int64, n)
+    local epoch = Ref(zero(Int64))
+
     local elims = ElimRecord[]
 
-    # LIFO worklist of currently degree-1/2 nodes (order does not affect
+    # LIFO worklist of candidate degree-1/2 nodes (order does not affect
     # exactness; forward/back use the recorded elimination order)
     local stack = Int64[]
-    local inq = falses(n)
+    local inq = fill(false, n)
     @inbounds for i = 1:n
-        local deg = length(adj[i])
-        if deg == 1 || deg == 2
+        if deg[i] == 1 || deg[i] == 2
             push!(stack, i)
             inq[i] = true
         end
@@ -110,74 +133,141 @@ function eliminate_deg12(A::SparseMatrixCSC)
         local v = pop!(stack)
         inq[v] = false
         alive[v] || continue
-        local deg = length(adj[v])
-        (deg == 1 || deg == 2) || continue
+        local nbrs, ws = compact_adjacency!(
+            v, A, rows, vals, base_live, spill_nbr, spill_w, alive, deg, mark, slot, epoch)
+        local dv = length(nbrs)
+        # exact-degree check: deg-0 (ground) survives; a stale lower bound is a skip
+        (dv == 1 || dv == 2) || continue
 
         local p = d[v]
-        local nbrs = collect(keys(adj[v]))
-        local ws = Float64[adj[v][k] for k in nbrs]
         push!(elims, ElimRecord(v, nbrs, ws, p))
-
-        # detach v from the graph
-        for k in nbrs
-            delete!(adj[k], v)
-        end
         alive[v] = false
-        empty!(adj[v])
 
         # Schur diagonal corrections on the neighbors
-        for a = 1:deg
+        for a = 1:dv
             d[nbrs[a]] -= ws[a]^2 / p
         end
         # single fill / series edge between the two neighbors of a degree-2 node
-        if deg == 2
-            local i = nbrs[1]
-            local j = nbrs[2]
+        if dv == 2
             local f = ws[1] * ws[2] / p
-            adj[i][j] = get(adj[i], j, 0.0) + f
-            adj[j][i] = get(adj[j], i, 0.0) + f
+            push_fill!(spill_nbr, spill_w, nbrs[1], nbrs[2], f)
+            push_fill!(spill_nbr, spill_w, nbrs[2], nbrs[1], f)
         end
 
-        # re-enqueue neighbors that just became degree-1/2
+        # neighbors lost a distinct live neighbor; enqueue new candidates
         for k in nbrs
-            if alive[k] && !inq[k]
-                local dk = length(adj[k])
-                if dk == 1 || dk == 2
-                    push!(stack, k)
-                    inq[k] = true
-                end
+            deg[k] -= 1
+            if alive[k] && deg[k] <= 2 && !inq[k]
+                push!(stack, k)
+                inq[k] = true
             end
         end
     end
 
     local ind = findall(alive)
     local m = length(ind)
-    local pos = Dict{Int64,Int64}()
-    for (r, orig) in enumerate(ind)
-        pos[orig] = r
+    local pos = zeros(Int64, n)
+    @inbounds for r = 1:m
+        pos[ind[r]] = r
     end
 
-    # rebuild the reduced matrix from surviving diagonals and (symmetric) edges
+    # rebuild the reduced matrix from compacted survivors
     local I = Int64[]
     local J = Int64[]
     local V = Float64[]
     for orig in ind
+        local nbrs, ws = compact_adjacency!(
+            orig, A, rows, vals, base_live, spill_nbr, spill_w, alive, deg, mark, slot, epoch)
         local r = pos[orig]
         push!(I, r)
         push!(J, r)
         push!(V, d[orig])
-        for (k, w) in adj[orig]
-            local rk = get(pos, k, 0)
-            if rk != 0
-                push!(I, r)
-                push!(J, rk)
-                push!(V, -w)
-            end
+        for a = 1:length(nbrs)
+            push!(I, r)
+            push!(J, pos[nbrs[a]])
+            push!(V, -ws[a])
         end
     end
     local A_red = sparse(I, J, V, m, m)
 
     return elims, ind, A_red, is_lap
+end
+
+# Dedupe the live adjacency of `v` (base CSC slice + spill), summing duplicate
+# neighbors with the epoch-stamped sparse accumulator, and store the compacted
+# form back (base slice consumed, spill := compacted). Returns `(nbrs, ws)` —
+# the same vectors that now back the node's adjacency; an eliminated node hands
+# them to its ElimRecord (it is dead, so the aliasing is harmless), and fills
+# arriving later are appended after them.
+function compact_adjacency!(
+    v::Int64,
+    A::SparseMatrixCSC,
+    rows::AbstractVector,
+    vals::AbstractVector,
+    base_live::Vector{Bool},
+    spill_nbr::Vector{Vector{Int64}},
+    spill_w::Vector{Vector{Float64}},
+    alive::Vector{Bool},
+    deg::Vector{Int64},
+    mark::Vector{Int64},
+    slot::Vector{Int64},
+    epoch::Base.RefValue{Int64},
+)
+    epoch[] += 1
+    local e = epoch[]
+    local nbrs = Int64[]
+    local ws = Float64[]
+    @inbounds if base_live[v]
+        for r in nzrange(A, v)
+            local k = Int64(rows[r])
+            (k == v || !alive[k]) && continue
+            if mark[k] != e
+                mark[k] = e
+                push!(nbrs, k)
+                push!(ws, -Float64(vals[r]))
+                slot[k] = length(nbrs)
+            else
+                ws[slot[k]] -= Float64(vals[r])
+            end
+        end
+    end
+    @inbounds if isassigned(spill_nbr, v)
+        local sn = spill_nbr[v]
+        local sw = spill_w[v]
+        for a = 1:length(sn)
+            local k = sn[a]
+            alive[k] || continue
+            if mark[k] != e
+                mark[k] = e
+                push!(nbrs, k)
+                push!(ws, sw[a])
+                slot[k] = length(nbrs)
+            else
+                ws[slot[k]] += sw[a]
+            end
+        end
+    end
+    base_live[v] = false
+    spill_nbr[v] = nbrs
+    spill_w[v] = ws
+    deg[v] = length(nbrs)
+    return nbrs, ws
+end
+
+@inline function push_fill!(
+    spill_nbr::Vector{Vector{Int64}},
+    spill_w::Vector{Vector{Float64}},
+    x::Int64,
+    y::Int64,
+    f::Float64,
+)
+    if !isassigned(spill_nbr, x)
+        spill_nbr[x] = Int64[]
+        spill_w[x] = Float64[]
+    end
+    push!(spill_nbr[x], y)
+    push!(spill_w[x], f)
+    return nothing
 end
 
 """
