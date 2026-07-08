@@ -4,6 +4,7 @@ using LinearAlgebra
 using LDLFactorizations
 using Laplacians
 
+include("contract.jl")
 include("cmgAlg.jl")
 include("elimination.jl")
 include("kcycle.jl")

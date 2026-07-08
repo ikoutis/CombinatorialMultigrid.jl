@@ -221,8 +221,11 @@ function build_hierarchy(A::T, A_::T)::Vector{HierarchyLevel} where {T<:SparseMa
             break
         end
 
-        local Rt = sparse(cI, 1:n, 1, nc, n) # ! take out double
-        A_ = Rt * A * Rt'
+        # Combinatorial contraction; equivalent to the sparse triple product
+        # below (kept for A/B toggling — see experiments/contraction/).
+        # local Rt = sparse(cI, 1:n, 1, nc, n) # ! take out double
+        # A_ = Rt * A * Rt'
+        A_ = contract_coo(A, cI, nc)
         push!(H, hl)
 
         if sflag
