@@ -276,7 +276,8 @@ Keyword arguments:
   and degree-2 nodes (a partial Cholesky / Schur complement), then solve the
   reduced core. This is a large win on near-tree inputs and costs only one extra
   O(n+m) pass otherwise. Set `eliminate = false` for graphs with no low-degree
-  (tree-like) structure to skip it. Ignored when a prebuilt hierarchy is passed.
+  (tree-like) structure to skip it. Matrix input only — the hierarchy methods do
+  not accept this keyword (the elimination decision is baked in at build time).
 - `tol = 1e-8`: relative residual tolerance.
 - `maxit = 500`: maximum outer iterations.
 - `cycle = :kcycle`: preconditioning cycle; `:kcycle` (inner flexible-CG
