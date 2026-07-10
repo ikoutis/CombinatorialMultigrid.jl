@@ -53,16 +53,19 @@ problems. You can change either choice with the keywords below.
 built. This is a **large win when the graph has tree-like / low-degree
 structure** — paths, near-trees, meshes with low-degree boundaries, anything
 with many chains or leaves — because those vertices are factored out for free.
-On a graph with **no low-degree structure** (dense graphs, expanders, cliques),
-there is nothing to eliminate, so it only adds a single linear-time pass. In
-that case turn it off:
+
+The elimination is **adaptive**: a cheap allocation-free scan runs first, and
+when the graph has (almost) no degree-1/2 vertices — dense graphs, expanders,
+cliques, interior-dominated grids — the elimination machinery is skipped
+automatically, so the default costs only that single pass. To skip even the
+scan:
 
 ```julia
 (x, stats) = cmg_solve(A, b; eliminate = false)
 ```
 
-The result is the same solution either way — elimination is exact — so this is
-purely a performance choice.
+The result is the same solution either way — elimination is exact and the
+adaptive skip only avoids work — so this is purely a performance choice.
 
 ### Legacy CMG
 

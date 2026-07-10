@@ -144,6 +144,8 @@ out by a partial Cholesky (Schur complement), and CMG is built on the smaller
 surviving "core" matrix. In this mode the second return value is an
 `EliminatedHierarchy` (not a `Vector{HierarchyLevel}`); pass it to `cmg_solve`,
 which applies the exact forward/back-substitution around the reduced solve.
+The elimination is adaptive: a cheap scan skips it when the graph has (almost)
+no degree-1/2 candidates (see `build_eliminated_hierarchy`).
 
 `cycle` accepts `:kcycle`, `:legacy`, and the deprecated alias `:vcycle`.
 Either closure shares internal workspace across calls and is not reentrant or
