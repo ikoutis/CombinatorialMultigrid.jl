@@ -152,7 +152,7 @@ const CMG = CombinatorialMultigrid
             local n = size(A, 1)
             local x_true = randn(n)
             local b = A * x_true
-            local (x, stats) = cmg_solve(A, b; cycle = :kcycle)
+            local (x, stats) = cmg_solve(A, b; cycle = :kcycle, eliminate = false)
             @test stats.converged
             @test relres(A, x, b) < 1e-6
         end
@@ -162,8 +162,8 @@ const CMG = CombinatorialMultigrid
         Random.seed!(2)
         local A = grid3_sdd(16, 16, 16)
         local b = randn(size(A, 1))
-        local (xk, sk) = cmg_solve(A, b; cycle = :kcycle)
-        local (xv, sv) = cmg_solve(A, b; cycle = :vcycle)
+        local (xk, sk) = cmg_solve(A, b; cycle = :kcycle, eliminate = false)
+        local (xv, sv) = cmg_solve(A, b; cycle = :vcycle, eliminate = false)
         @test sk.converged && sv.converged
         @test relres(A, xk, b) < 1e-6
         @test relres(A, xv, b) < 1e-6
@@ -175,7 +175,7 @@ const CMG = CombinatorialMultigrid
         Random.seed!(3)
         local A = grid2_sdd(40, 40; wy = 50.0)
         local b = randn(size(A, 1))
-        local (x, stats) = cmg_solve(A, b; cycle = :kcycle, theta = 0.0, inner_tol = 0.0)
+        local (x, stats) = cmg_solve(A, b; cycle = :kcycle, theta = 0.0, inner_tol = 0.0, eliminate = false)
         @test stats.converged
         @test relres(A, x, b) < 1e-6
     end
@@ -185,7 +185,7 @@ const CMG = CombinatorialMultigrid
         local A = grid2_sdd(60, 60)
         local b = randn(size(A, 1))
 
-        local (x, stats) = cmg_solve(A, b; cycle = :kcycle, collect_stats = true)
+        local (x, stats) = cmg_solve(A, b; cycle = :kcycle, collect_stats = true, eliminate = false)
         @test stats.converged
         @test length(stats.level_visits) >= 1
         @test stats.level_visits[1] == stats.iterations
@@ -193,12 +193,12 @@ const CMG = CombinatorialMultigrid
         # budget mode does at least as many coarse visits per outer iteration
         # as the local-repeat opt-out at the second level
         local (_, s_local) =
-            cmg_solve(A, b; cycle = :kcycle, theta = 0.0, inner_tol = 0.0, collect_stats = true)
+            cmg_solve(A, b; cycle = :kcycle, theta = 0.0, inner_tol = 0.0, collect_stats = true, eliminate = false)
         if length(stats.level_visits) >= 2 && s_local.iterations > 0 && stats.iterations > 0
             @test stats.level_visits[2] >= stats.iterations  # at least one inner step each
         end
 
-        local (_, sv) = cmg_solve(A, b; cycle = :vcycle, collect_stats = true)
+        local (_, sv) = cmg_solve(A, b; cycle = :vcycle, collect_stats = true, eliminate = false)
         @test isempty(sv.level_visits)
     end
 
@@ -209,7 +209,7 @@ const CMG = CombinatorialMultigrid
         local b = randn(n)
         local x_ref = Matrix(A) \ b
         for cycle in (:kcycle, :vcycle)
-            local (x, stats) = cmg_solve(A, b; cycle = cycle, tol = 1e-10)
+            local (x, stats) = cmg_solve(A, b; cycle = cycle, tol = 1e-10, eliminate = false)
             @test stats.converged
             @test norm(x - x_ref) / norm(x_ref) < 1e-6
         end
@@ -222,7 +222,7 @@ const CMG = CombinatorialMultigrid
         local n = size(L, 1)
         local b = randn(n)
         b .-= sum(b) / n  # solvable rhs (orthogonal to the null space)
-        local (x, stats) = cmg_solve(L, b; cycle = :kcycle)
+        local (x, stats) = cmg_solve(L, b; cycle = :kcycle, eliminate = false)
         @test stats.converged
         @test relres(L, x, b) < 1e-6
     end
@@ -233,7 +233,7 @@ const CMG = CombinatorialMultigrid
         local n = size(A, 1)
         local b = randn(n)
 
-        # default is unchanged and PCG-safe
+        # cmg_preconditioner_lap default is the legacy linear cycle (PCG-safe)
         local (pfunc_v, H) = cmg_preconditioner_lap(A)
         local f = pcgSolver(A, pfunc_v)
         local x = f(b, maxits = 200, tol = 1e-8)
@@ -254,6 +254,30 @@ const CMG = CombinatorialMultigrid
         local (x2, stats2) = cmg_solve(Hk, b)
         @test stats2.converged
         @test relres(A, x2, b) < 1e-6
+    end
+
+    @testset "solve default (k-cycle + elim) and :legacy alias" begin
+        Random.seed!(11)
+        local A = grid2_sdd(30, 30)
+        local n = size(A, 1)
+        local b = randn(n)
+
+        # cmg_solve(A, b) with no options: k-cycle + elimination
+        local (xd, sd_) = cmg_solve(A, b)
+        @test sd_.converged
+        @test relres(A, xd, b) < 1e-6
+
+        # dropping elimination still solves the same system
+        local (xf, sf) = cmg_solve(A, b; eliminate = false)
+        @test sf.converged
+        @test relres(A, xf, b) < 1e-6
+        @test norm(xd - xf) / norm(xf) < 1e-4          # same solution either way
+
+        # :legacy names the classic cycle; :vcycle is a deprecated alias
+        local (xl, sl) = cmg_solve(A, b; cycle = :legacy, eliminate = false)
+        @test sl.converged && relres(A, xl, b) < 1e-6
+        @test_throws ArgumentError cmg_solve(A, b; cycle = :bogus)
+        @test_throws ArgumentError cmg_preconditioner_lap(A; cycle = :bogus)
     end
 
     @testset "degree-1/2 elimination: pure tree (exact)" begin
@@ -296,7 +320,7 @@ const CMG = CombinatorialMultigrid
                 # eliminate vs plain must agree
                 local (_, EH) = cmg_preconditioner_lap(L; cycle = cycle, eliminate = true)
                 local (xe, se) = cmg_solve(EH, b; cycle = cycle, tol = 1e-10)
-                local (xp, sp) = cmg_solve(L, b; cycle = cycle, tol = 1e-10)
+                local (xp, sp) = cmg_solve(L, b; cycle = cycle, tol = 1e-10, eliminate = false)
                 @test se.converged
                 @test relres(L, xe, b) < 1e-6
                 # both are valid solutions of a singular system; compare residuals

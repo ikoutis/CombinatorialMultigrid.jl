@@ -1,72 +1,129 @@
- 
 # CombinatorialMultigrid.jl
 
+This package implements the Combinatorial Multigrid (CMG) preconditioner and
+solver *[1]*. It handles symmetric diagonally dominant matrices with
+non-positive off-diagonal entries (SDDM) — a class that includes graph
+Laplacians and the SDD systems that arise from them. This work has been
+supported by NSF grant CCF-#1149048.
 
-This package implements the Combinatorial Multigrid Preconditioner *[1]*. The code handles input matrices that are symmetric diagonally dominant with negative off-diagonal entries, a class of matrices that includes graph Laplacians. This work has been supported by NSF grant CCF-#1149048.
+## Install
 
-
-In order to install the package simply do the following:
-```
+```julia
+using Pkg
 Pkg.add("CombinatorialMultigrid")
 using CombinatorialMultigrid
 ```
 
-## Quick start: the classic CMG preconditioner (default)
+## Quick start
 
-Given a Laplacian (or SDD) matrix `LX` — or an adjacency matrix `X` — build the preconditioner:
-
-```julia
-(pfunc, h) = cmg_preconditioner_lap(LX);   # from a Laplacian / SDD matrix
-(pfunc, h) = cmg_preconditioner_adj(X);    # or directly from an adjacency matrix
-```
-
-`pfunc` applies one multigrid cycle: `x = pfunc(b)` returns an approximate solution of `LX * x = b`. It is a fixed **linear** operator, so it can serve as the preconditioner inside any standard preconditioned conjugate gradient implementation. The second output `h` is the hierarchy of graphs that is implicitly used in `pfunc`; it is exposed for its potential in other applications, and it can be passed back to the solver below to avoid rebuilding.
-
-To solve a system directly, the package ships its own conjugate-gradient solver:
+To solve `A x = b` for a Laplacian / SDDM matrix `A`, just call `cmg_solve`:
 
 ```julia
-(x, stats) = cmg_solve(LX, b; cycle = :vcycle, tol = 1e-8);
-# or, reusing the hierarchy built above:
-(x, stats) = cmg_solve(h, b; cycle = :vcycle);
+(x, stats) = cmg_solve(A, b)
 
-stats.iterations, stats.relres, stats.converged
+stats.iterations   # outer flexible-CG iterations
+stats.relres       # final relative residual ‖A x − b‖ / ‖b‖
+stats.converged    # whether tol was reached
 ```
 
-With `cycle = :vcycle` this is plain PCG with the classic CMG preconditioner.
+**The default is the K-cycle with degree-1/2 elimination** (`cmg-k-elim`) — in
+our experience the fastest, most reliable configuration across a wide range of
+problems. You can change either choice with the keywords below.
 
-## The K-cycle solver
-
-The package also provides a **K-cycle** variant of the preconditioner: the stationary repeats of the classic cycle are replaced by a few inner flexible-CG (Krylov) iterations at each coarse level, preconditioned by the recursive K-cycle below. On anisotropic and high-contrast problems this typically reduces both iterations and wall time; on regular 3D grids it often wins on time even at equal iteration counts, because a work-budget rule caps the coarse-level effort. The classic cycle remains the default everywhere; the K-cycle is selected explicitly.
-
-Using it is one call — `cmg_solve` defaults to the K-cycle:
+## `cmg_solve` — the solver
 
 ```julia
-(x, stats) = cmg_solve(LX, b);            # K-cycle solve
-(x, stats) = cmg_solve(h, b);             # same, reusing a prebuilt hierarchy
+(x, stats) = cmg_solve(A, b; kwargs...)   # from a matrix; builds the hierarchy
+(x, stats) = cmg_solve(H, b; kwargs...)   # reuse a prebuilt hierarchy (see below)
 ```
-
-Knobs of `cmg_solve`:
 
 | keyword | default | meaning |
 |---|---|---|
-| `cycle` | `:kcycle` | `:kcycle` or `:vcycle` (classic stationary cycle) |
-| `tol` | `1e-8` | relative residual tolerance |
-| `maxit` | `500` | maximum outer iterations |
-| `theta` | `0.75` | work-budget cap for the inner iterations; `0.0` opts out into fixed local repeats |
-| `inner_tol` | `0.25` | adaptive early-stopping for the inner FCG; `0.0` disables |
-| `collect_stats` | `false` | record per-level K-cycle visit counts in `stats.level_visits` |
+| `eliminate` | `true` | first exactly factor out degree-1 and degree-2 vertices (partial Cholesky / Schur complement), then solve the smaller "core". Matrix input only. |
+| `cycle` | `:kcycle` | `:kcycle` (Krylov-accelerated) or `:legacy` (the classic CMG cycle). |
+| `tol` | `1e-8` | relative residual tolerance. |
+| `maxit` | `500` | maximum outer iterations. |
+| `theta` | `0.75` | K-cycle work-budget cap; `0.0` opts out into fixed local repeats. |
+| `inner_tol` | `0.25` | adaptive early-stopping for the inner iterations; `0.0` disables. |
+| `collect_stats` | `false` | record per-level K-cycle visit counts in `stats.level_visits`. |
 
-A single K-cycle application is also available from the preconditioner constructors via a knob:
+### Dropping elimination when there's no tree structure
+
+`eliminate = true` exactly removes degree-1 and degree-2 vertices before CMG is
+built. This is a **large win when the graph has tree-like / low-degree
+structure** — paths, near-trees, meshes with low-degree boundaries, anything
+with many chains or leaves — because those vertices are factored out for free.
+On a graph with **no low-degree structure** (dense graphs, expanders, cliques),
+there is nothing to eliminate, so it only adds a single linear-time pass. In
+that case turn it off:
 
 ```julia
-(pfunc_k, h) = cmg_preconditioner_lap(LX; cycle = :kcycle);
-x ≈ pfunc_k(b)   # one K-cycle sweep
+(x, stats) = cmg_solve(A, b; eliminate = false)
 ```
 
-> **Warning.** The K-cycle operator is *nonlinear* (it runs inner Krylov iterations), so `pfunc_k` must **not** be used as the preconditioner inside a standard PCG — drive it with `cmg_solve`, whose flexible-CG outer loop supports it. The default (`cycle = :vcycle`) preconditioner remains a fixed linear operator and is safe in any PCG.
+The result is the same solution either way — elimination is exact — so this is
+purely a performance choice.
 
-`example/bench_kcycle.jl` compares the two cycles on uniform and anisotropic grids.
+### Legacy CMG
 
-**Citations:**
+The classic CMG cycle *[1]* is available as `cycle = :legacy`:
 
-[1] Ioannis Koutis, Gary L. Miller, David Tolliver, Combinatorial preconditioners and multilevel solvers for problems in computer vision and image processing, Computer Vision and Image Understanding, Volume 115, Issue 12, 2011, Pages 1638-1646, ISSN 1077-3142, https://doi.org/10.1016/j.cviu.2011.05.013.*
+```julia
+(x, stats) = cmg_solve(A, b; cycle = :legacy)                    # legacy cycle + elimination
+(x, stats) = cmg_solve(A, b; cycle = :legacy, eliminate = false) # the original CMG, unchanged
+```
+
+Unlike the K-cycle, the legacy cycle is a **fixed linear operator**, so it — and
+only it — can be handed to your own PCG (see the next section). `:vcycle` is
+accepted as a deprecated alias for `:legacy`; note the legacy cycle is a
+*stationary* iteration, not a true geometric V-cycle, so we spell it `:legacy`.
+
+## Using CMG as a preconditioner in your own solver
+
+If you want the preconditioner operator itself (for example to drive
+`Laplacians.pcgSolver` or another Krylov method), use `cmg_preconditioner_lap`
+(or `cmg_preconditioner_adj` to pass an adjacency matrix directly):
+
+```julia
+(pfunc, H) = cmg_preconditioner_lap(A)          # from a Laplacian / SDDM matrix
+(pfunc, H) = cmg_preconditioner_adj(Adj)        # from an adjacency matrix
+
+x = pfunc(b)                                     # apply one cycle: x ≈ A \ b
+```
+
+`cmg_preconditioner_lap` defaults to `cycle = :legacy`, which returns a **linear**
+`pfunc` that is safe inside any standard PCG. The second return value `H` is the
+graph hierarchy; pass it back to `cmg_solve(H, b; ...)` to avoid rebuilding.
+
+```julia
+(pfunc_k, H) = cmg_preconditioner_lap(A; cycle = :kcycle)   # one K-cycle sweep
+```
+
+> **Warning.** The K-cycle operator is *nonlinear* (it runs inner Krylov
+> iterations), so `pfunc_k` must **not** be used as the preconditioner inside a
+> standard PCG. Drive it with `cmg_solve`, whose flexible-CG outer loop supports
+> it. Only the `:legacy` preconditioner is a fixed linear operator.
+
+With `eliminate = true` the second return value is an `EliminatedHierarchy`
+(rather than a `Vector{HierarchyLevel}`); pass it to `cmg_solve`, which handles
+the exact forward/back-substitution around the reduced solve.
+
+## Input matrices
+
+Inputs must be symmetric with non-positive off-diagonals (Laplacians and SDDM
+matrices). Purely Laplacian systems are singular; supply a right-hand side in the
+range (e.g. mean-centered, `b .-= sum(b)/length(b)`), and the returned solution
+is fixed to the corresponding null-space reference.
+
+## Notes
+
+- The preconditioner/solver closures reuse internal workspace across calls and
+  are **not** reentrant or thread-safe; use one per thread.
+- `example/bench_kcycle.jl` compares the cycles on uniform and anisotropic grids.
+
+## Citation
+
+[1] Ioannis Koutis, Gary L. Miller, David Tolliver, *Combinatorial
+preconditioners and multilevel solvers for problems in computer vision and image
+processing*, Computer Vision and Image Understanding, Volume 115, Issue 12,
+2011, Pages 1638–1646. https://doi.org/10.1016/j.cviu.2011.05.013

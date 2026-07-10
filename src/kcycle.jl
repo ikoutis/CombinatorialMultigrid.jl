@@ -268,12 +268,22 @@ internally. Returns the solution and a `CMGStats` with `iterations`,
 `relres`, `converged` and (with `collect_stats = true`) per-level
 `level_visits`.
 
+**The default configuration is the K-cycle with degree-1/2 elimination** (see
+`eliminate` below) — the recommended, generally-fastest way to solve a system.
+
 Keyword arguments:
+- `eliminate = true` (matrix `A` input only): first exactly factor out degree-1
+  and degree-2 nodes (a partial Cholesky / Schur complement), then solve the
+  reduced core. This is a large win on near-tree inputs and costs only one extra
+  O(n+m) pass otherwise. Set `eliminate = false` for graphs with no low-degree
+  (tree-like) structure to skip it. Ignored when a prebuilt hierarchy is passed.
 - `tol = 1e-8`: relative residual tolerance.
 - `maxit = 500`: maximum outer iterations.
 - `cycle = :kcycle`: preconditioning cycle; `:kcycle` (inner flexible-CG
-  acceleration at the coarse levels) or `:vcycle` (the legacy stationary
-  cycle, with which the outer loop reduces to plain PCG).
+  acceleration at the coarse levels) or `:legacy` (the classic stationary CMG
+  cycle, with which the outer loop reduces to plain PCG). `:vcycle` is accepted
+  as a deprecated alias of `:legacy` (the legacy cycle is a stationary
+  iteration, not a true geometric V-cycle).
 - `theta = 0.75`: K-cycle work-budget cap (see `compute_kcycle_repeats`);
   `0.0` opts out into the fixed local repeat rule.
 - `inner_tol = 0.25`: adaptive stopping for the inner FCG iterations;
@@ -290,9 +300,7 @@ function cmg_solve(
     inner_tol::Float64 = 0.25,
     collect_stats::Bool = false,
 )
-    if cycle !== :kcycle && cycle !== :vcycle
-        throw(ArgumentError("unknown cycle $(repr(cycle)); use :kcycle or :vcycle"))
-    end
+    local c = _canonical_cycle(cycle)
 
     local sd = H[1].sd && H[1].n > 1
     local n_orig = sd ? H[1].n - 1 : H[1].n
@@ -303,13 +311,25 @@ function cmg_solve(
     # SDD wrapper: run the whole solve on the augmented system, extract after
     local b_sys::Vector{Float64} = sd ? [Float64.(b); -sum(b)] : Vector{Float64}(b)
 
-    local x_sys, stats = fcg_solve!(H, b_sys, tol, maxit, cycle, theta, inner_tol, collect_stats)
+    local x_sys, stats = fcg_solve!(H, b_sys, tol, maxit, c, theta, inner_tol, collect_stats)
 
     local x = sd ? x_sys[1:n_orig] .- x_sys[n_orig+1] : x_sys
     return (x, stats)
 end
 
-function cmg_solve(A::SparseMatrixCSC, b::AbstractVector{<:Real}; kwargs...)
+function cmg_solve(
+    A::SparseMatrixCSC,
+    b::AbstractVector{<:Real};
+    eliminate::Bool = true,
+    kwargs...,
+)
+    if eliminate
+        # Default path: exactly factor out degree-1/2 nodes, then solve the
+        # reduced core. On near-tree inputs this is a large win; on inputs with
+        # no low-degree structure it costs one extra O(n+m) pass and otherwise
+        # matches the plain solve. Pass `eliminate = false` to skip it.
+        return cmg_solve(build_eliminated_hierarchy(A), b; kwargs...)
+    end
     local A_ = validateInput!(A)  # throws if not valid
     cmg_solve(build_hierarchy(A, A_), b; kwargs...)
 end
@@ -334,9 +354,7 @@ function cmg_solve(
     inner_tol::Float64 = 0.25,
     collect_stats::Bool = false,
 )
-    if cycle !== :kcycle && cycle !== :vcycle
-        throw(ArgumentError("unknown cycle $(repr(cycle)); use :kcycle or :vcycle"))
-    end
+    local c = _canonical_cycle(cycle)
     if length(b) != EH.n
         throw(DimensionMismatch("length(b) = $(length(b)), expected $(EH.n)"))
     end
@@ -364,7 +382,7 @@ function cmg_solve(
             b_red;
             tol = tol,
             maxit = maxit,
-            cycle = cycle,
+            cycle = c,
             theta = theta,
             inner_tol = inner_tol,
             collect_stats = collect_stats,
