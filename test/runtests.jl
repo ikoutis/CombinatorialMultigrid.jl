@@ -499,6 +499,46 @@ const CMG = CombinatorialMultigrid
         @test_throws ArgumentError cmg_preconditioner_lap(Apos; eliminate = true)
     end
 
+    @testset "adaptive elimination skip" begin
+        Random.seed!(18)
+
+        # 3D grid: every node has degree >= 3, so there is nothing to
+        # eliminate; the pre-scan must skip the machinery and alias the input
+        local A3 = grid3_sdd(8, 8, 8)
+        local n3 = size(A3, 1)
+        local (_, EH3) = cmg_preconditioner_lap(A3; cycle = :kcycle, eliminate = true)
+        @test length(EH3.elims) == 0
+        @test EH3.ind == collect(1:n3)
+        @test EH3.A_red === A3                    # aliased, not rebuilt
+        @test !isempty(EH3.H)
+        local b3 = randn(n3)
+        local (xe, se) = cmg_solve(EH3, b3; tol = 1e-10)
+        local (xf, sf) = cmg_solve(A3, b3; tol = 1e-10, eliminate = false)
+        @test se.converged && sf.converged
+        @test norm(xe - xf) / norm(xf) < 1e-6     # same system, same solution
+
+        # a handful of candidates below the 1% threshold (grid corners) skips too
+        local A2 = grid2_sdd(30, 30)
+        local n2 = size(A2, 1)
+        local (_, EH2) = cmg_preconditioner_lap(A2; eliminate = true)
+        @test length(EH2.elims) == 0
+        @test EH2.A_red === A2
+        # ...but the explicit knob can force those corners out, exactly
+        local EH2f = CMG.build_eliminated_hierarchy(A2; min_frac = 0.0)
+        @test 0 < length(EH2f.elims)
+        @test length(EH2f.ind) < n2
+        local bg = randn(n2)
+        local (xg, sg) = cmg_solve(EH2f, bg; tol = 1e-10)
+        local xg_ref = Matrix(A2) \ bg
+        @test sg.converged
+        @test norm(xg - xg_ref) / norm(xg_ref) < 1e-6
+
+        # near-trees stay far above the threshold and still eliminate
+        local L = lap(tree_plus_offtree_adj(400, 15))
+        local (_, EHt) = cmg_preconditioner_lap(L; eliminate = true)
+        @test length(EHt.ind) < 400
+    end
+
     @testset "eliminated preconditioner closure reuse" begin
         # the closure shares workspace across calls (documented non-reentrant);
         # repeated applies must keep working and the V-cycle variant must be

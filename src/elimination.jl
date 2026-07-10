@@ -334,25 +334,84 @@ end
 end
 
 """
-    EH = build_eliminated_hierarchy(A_lap)
+    EH = build_eliminated_hierarchy(A_lap; min_frac = ELIM_MIN_FRAC)
 
 Run `eliminate_deg12` on `A_lap` and build a CMG hierarchy on the reduced matrix
 (when it has at least two nodes). Returns an `EliminatedHierarchy`. Throws the
 same `ArgumentError`s as the non-elimination path for an asymmetric matrix or a
 positive off-diagonal.
+
+**Adaptive skip:** when fewer than `min_frac` of the nodes (floor: 2) are
+degree-1/2 candidates — decided by one allocation-free scan — the elimination
+machinery is skipped and the hierarchy is built directly on the input, with
+`ind = 1:n`, empty `elims`, and `A_red` aliasing the input (no rebuild). The
+result is exact either way; the skip only avoids paying several full passes
+and a matrix rebuild on graphs with no low-degree structure.
 """
-function build_eliminated_hierarchy(A_lap::SparseMatrixCSC)::EliminatedHierarchy
+# Allocation-free pre-scan: count the degree-1/2 elimination candidates and
+# detect the Laplacian property (same criterion as eliminate_deg12's setup).
+# One pass over the CSC arrays, no allocation — the cheap gate that decides
+# whether the (much more expensive) elimination machinery is worth running.
+function scan_deg12(A::SparseMatrixCSC)
+    local n = size(A, 1)
+    local rows = rowvals(A)
+    local vals = nonzeros(A)
+    local cand = 0
+    local maxabsrowsum = 0.0
+    local maxdiag = 0.0
+    @inbounds for j = 1:n
+        local s = 0.0
+        local c = 0
+        for r in nzrange(A, j)
+            local v = vals[r]
+            s += v
+            if rows[r] == j
+                maxdiag = max(maxdiag, v)
+            else
+                c += 1
+            end
+        end
+        (c == 1 || c == 2) && (cand += 1)
+        maxabsrowsum = max(maxabsrowsum, abs(s))
+    end
+    local is_lap = n == 0 ? true : maxabsrowsum <= 1e-13 * max(1.0, maxdiag)
+    return cand, is_lap
+end
+
+# Skip elimination when fewer than this fraction of the nodes are degree-1/2
+# candidates (with an absolute floor of 2): the elimination machinery costs
+# several full passes plus a matrix rebuild, which buys nothing on graphs
+# without low-degree structure. The initial candidate count is a lower bound
+# on what a full cascade could remove, so near-trees always clear the gate.
+const ELIM_MIN_FRAC = 0.01
+
+function build_eliminated_hierarchy(
+    A_lap::SparseMatrixCSC;
+    min_frac::Float64 = ELIM_MIN_FRAC,
+)::EliminatedHierarchy
+    local n = size(A_lap, 1)
+
+    # Adaptive skip: with (almost) no degree-1/2 candidates, elimination would
+    # rebuild the matrix for nothing — build plain CMG on the input instead.
+    # Exactness is unaffected (this skips work, it approximates nothing), and
+    # validateInput! performs the symmetry/off-diagonal checks on this path.
+    local cand, is_lap = scan_deg12(A_lap)
+    if cand < max(2, ceil(Int, min_frac * n))
+        local A_ = validateInput!(A_lap)
+        local H = build_hierarchy(A_lap, A_)
+        return EliminatedHierarchy(ElimSequence(), collect(Int64, 1:n), n, H, A_lap, is_lap)
+    end
+
     if !issymmetric(A_lap)
         throw(ArgumentError("Input Matrix Must Be Symmetric!"))
     end
-    local n = size(A_lap, 1)
-    local elims, ind, A_red, is_lap = eliminate_deg12(A_lap)
+    local elims, ind, A_red, is_lap_e = eliminate_deg12(A_lap)
     local H = HierarchyLevel[]
     if length(ind) >= 2
         local A_red_ = validateInput!(A_red)   # reuses SDD augmentation
         H = build_hierarchy(A_red, A_red_)
     end
-    return EliminatedHierarchy(elims, ind, n, H, A_red, is_lap)
+    return EliminatedHierarchy(elims, ind, n, H, A_red, is_lap_e)
 end
 
 """
