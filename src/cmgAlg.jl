@@ -111,49 +111,62 @@ end
 
 ##
 
+# Normalize a user-facing cycle symbol to the internal canonical form.
+# Accepts :kcycle, :legacy (the classic stationary CMG cycle), and :vcycle
+# (a deprecated alias of :legacy — kept for backward compatibility; note the
+# legacy cycle is a stationary iteration, not a true geometric V-cycle).
+# Returns :kcycle or :vcycle.
+function _canonical_cycle(cycle::Symbol)
+    cycle === :kcycle && return :kcycle
+    (cycle === :legacy || cycle === :vcycle) && return :vcycle
+    throw(ArgumentError("unknown cycle $(repr(cycle)); use :kcycle or :legacy"))
+end
+
 """
-    (pfunc, H) = cmg_preconditioner_lap(A_lap; cycle=:vcycle, theta=0.75, inner_tol=0.25, eliminate=false)
+    (pfunc, H) = cmg_preconditioner_lap(A_lap; cycle=:legacy, theta=0.75, inner_tol=0.25, eliminate=false)
 
 Build the CMG hierarchy for the Laplacian (or SDD matrix) `A_lap` and return a
 preconditioner function `pfunc` together with the hierarchy `H`.
 
-With the default `cycle = :vcycle`, `pfunc` is the legacy stationary cycle — a
-fixed linear operator, safe to use inside a standard PCG such as
-`Laplacians.pcgSolver`. With `cycle = :kcycle`, `pfunc` applies one K-cycle
-sweep (inner flexible-CG acceleration at the coarse levels, controlled by
-`theta` and `inner_tol` — see `cmg_solve`). The K-cycle operator is
-*nonlinear*: it must NOT be passed as a preconditioner to `pcgSolver` or any
-standard CG. Use `cmg_solve`, whose flexible-CG outer loop supports it.
+This is the factory for a **reusable preconditioner operator**, e.g. to drive
+your own PCG. Its default `cycle = :legacy` returns the classic CMG cycle — a
+fixed *linear* operator, safe inside a standard PCG such as
+`Laplacians.pcgSolver`. (To solve a system directly, prefer `cmg_solve`, whose
+default is the faster K-cycle + elimination.)
+
+With `cycle = :kcycle`, `pfunc` applies one K-cycle sweep (inner flexible-CG
+acceleration at the coarse levels, controlled by `theta` and `inner_tol` — see
+`cmg_solve`). The K-cycle operator is *nonlinear*: it must NOT be passed as a
+preconditioner to `pcgSolver` or any standard CG — drive it with `cmg_solve`.
 
 With `eliminate = true`, degree-1 and degree-2 nodes are first exactly factored
 out by a partial Cholesky (Schur complement), and CMG is built on the smaller
 surviving "core" matrix. In this mode the second return value is an
 `EliminatedHierarchy` (not a `Vector{HierarchyLevel}`); pass it to `cmg_solve`,
-which applies the exact forward/back-substitution around the reduced solve. The
-default `eliminate = false` leaves every existing code path unchanged.
+which applies the exact forward/back-substitution around the reduced solve.
 
+`cycle` accepts `:kcycle`, `:legacy`, and the deprecated alias `:vcycle`.
 Either closure shares internal workspace across calls and is not reentrant or
 thread-safe.
 """
 function cmg_preconditioner_lap(
     A_lap::SparseMatrixCSC;
-    cycle::Symbol = :vcycle,
+    cycle::Symbol = :legacy,
     theta::Float64 = 0.75,
     inner_tol::Float64 = 0.25,
     eliminate::Bool = false,
 )
+    local c = _canonical_cycle(cycle)
     if eliminate
         local EH = build_eliminated_hierarchy(A_lap)
-        return (make_eliminated_preconditioner(EH, cycle, theta, inner_tol), EH)
+        return (make_eliminated_preconditioner(EH, c, theta, inner_tol), EH)
     end
     local A_lap_ = validateInput!(A_lap)  # throws if not valid
-    if cycle === :vcycle
+    if c === :vcycle
         return cmg_!(A_lap, A_lap_)
-    elseif cycle === :kcycle
+    else  # :kcycle
         local H = build_hierarchy(A_lap, A_lap_)
         return (make_kcycle_preconditioner(H, theta, inner_tol), H)
-    else
-        throw(ArgumentError("unknown cycle $(repr(cycle)); use :vcycle or :kcycle"))
     end
 end
 

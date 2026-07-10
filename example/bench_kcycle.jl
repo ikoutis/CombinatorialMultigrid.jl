@@ -32,15 +32,15 @@ function bench(name, A)
     t_pcg = @elapsed x = f(b, maxits = 500, tol = tol)
     r_pcg = norm(A * x - b) / norm(b)
 
-    # (b) stationary cycle inside the flexible-CG outer loop (= plain PCG)
-    t_v = @elapsed (xv, sv) = cmg_solve(H, b; cycle = :vcycle, tol = tol)
+    # (b) legacy stationary cycle inside the flexible-CG outer loop (= plain PCG)
+    t_v = @elapsed (xv, sv) = cmg_solve(H, b; cycle = :legacy, tol = tol)
 
     # (c) K-cycle (default knobs: theta = 0.75, inner_tol = 0.25)
     t_k = @elapsed (xk, sk) = cmg_solve(H, b; cycle = :kcycle, tol = tol)
 
     println("== $name  (n = $(size(A, 1)), build $(round(tb, digits = 3))s)")
     println("  pcgSolver + legacy pfunc : $(round(t_pcg, digits = 3))s  relres = $(round(r_pcg, sigdigits = 3))")
-    println("  cmg_solve :vcycle        : $(sv.iterations) iters  $(round(t_v, digits = 3))s  relres = $(round(sv.relres, sigdigits = 3))")
+    println("  cmg_solve :legacy        : $(sv.iterations) iters  $(round(t_v, digits = 3))s  relres = $(round(sv.relres, sigdigits = 3))")
     println("  cmg_solve :kcycle        : $(sk.iterations) iters  $(round(t_k, digits = 3))s  relres = $(round(sk.relres, sigdigits = 3))")
 end
 

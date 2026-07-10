@@ -405,7 +405,7 @@ end
 
 Wrap the reduced-system preconditioner with the exact forward/back substitution
 so the returned closure applies one full compressed CMG cycle on the original
-coordinates. With `cycle = :vcycle` the closure is a fixed linear operator (safe
+coordinates. With `cycle = :legacy` the closure is a fixed linear operator (safe
 in a standard PCG); with `cycle = :kcycle` it is nonlinear and must be driven by
 `cmg_solve`. The closure shares internal workspace across calls (the returned
 vector is a reused buffer, like CMG's other preconditioner closures) and is not
@@ -417,9 +417,7 @@ function make_eliminated_preconditioner(
     theta::Float64,
     inner_tol::Float64,
 )::Function
-    if cycle !== :vcycle && cycle !== :kcycle
-        throw(ArgumentError("unknown cycle $(repr(cycle)); use :vcycle or :kcycle"))
-    end
+    local c = _canonical_cycle(cycle)
 
     local m = length(EH.ind)
     local inner::Function
@@ -437,7 +435,7 @@ function make_eliminated_preconditioner(
                 xred1
             end
         end
-    elseif cycle === :vcycle
+    elseif c === :vcycle
         local X = init_LevelAux(EH.H)
         local W = init_Workspace(EH.H)
         local M = init_Hierarchy(EH.H)
