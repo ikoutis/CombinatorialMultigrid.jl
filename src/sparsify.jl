@@ -16,8 +16,13 @@ Tuning knobs for sparsify-on-stall (see `cmg_solve(A, b; sparsify_on_stall=true,
 sparsify_opts=SparsifyOptions(...))`). Defaults are the production values
 validated in the CMG-python package.
 
-- `keep_frac`  : target keep-fraction for off-bundle edges (0.25 -> C_op ~ 1.25).
-- `bundles`    : number of peeled spanners kept at full weight (default 2).
+- `keep_frac`  : target keep-fraction for off-bundle edges (0.5 -> C_op ~ 2).
+                 For the L-cycle this sets the injected level's repeat multiplier
+                 = floor(1/keep_frac - 1): 0.5 -> repeat 1 (cheapest), 1/3 ->
+                 repeat 2. Lower keep_frac sparsifies harder but raises the repeat.
+- `bundles`    : number of peeled spanners kept at full weight (default 1; each
+                 extra bundle is another spanner build, so it ~doubles the
+                 per-injection build cost).
 - `t`          : greedy-spanner stretch; `nothing` -> `max(2, log2 n)` per level.
 - `stall_ratio`: per-level NODE-coarsening threshold; a level is productive iff
                  aggregation drops the node count below `stall_ratio * n`
@@ -36,8 +41,8 @@ validated in the CMG-python package.
                  the preconditioner reproducible).
 """
 Base.@kwdef struct SparsifyOptions
-    keep_frac::Float64 = 0.25
-    bundles::Int = 2
+    keep_frac::Float64 = 0.5
+    bundles::Int = 1
     t::Union{Nothing,Float64} = nothing
     stall_ratio::Float64 = 0.9   # NODE-coarsening threshold: a level is
                                  # productive iff aggregation drops nc below
