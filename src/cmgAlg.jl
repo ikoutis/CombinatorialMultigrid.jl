@@ -118,8 +118,9 @@ end
 # Returns :kcycle or :vcycle.
 function _canonical_cycle(cycle::Symbol)
     cycle === :kcycle && return :kcycle
+    cycle === :kscycle && return :kscycle
     (cycle === :legacy || cycle === :vcycle) && return :vcycle
-    throw(ArgumentError("unknown cycle $(repr(cycle)); use :kcycle or :legacy"))
+    throw(ArgumentError("unknown cycle $(repr(cycle)); use :kcycle, :legacy, or :kscycle"))
 end
 
 """

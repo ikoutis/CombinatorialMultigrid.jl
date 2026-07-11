@@ -255,6 +255,150 @@ function inner_fcg!(
     return z
 end
 
+# ---------------------------------------------------------------------------
+# Ks-cycle: a K-cycle that adapts to injected same-size sparsifier levels.
+#
+# port: CMG-python src/pycmg/_kscycle.py (operator mode). The stock K-cycle
+# degrades on a same-size sparsify level because inner_fcg! minimizes the step
+# over H[lvl+1].A (the sparsifier), while the identity transfer makes the
+# consistent operator the level's OWN A. kscycle! special-cases such a level
+# (nc == n and not last): its inner FCG minimizes over H[lvl].A and runs
+# _KSCYCLE_NU iterations, using the sub-hierarchy as an accelerated inner
+# solver. On a hierarchy with no same-size levels it reduces exactly to
+# kcycle!. The recommended driver for a sparsified hierarchy is still the
+# L-cycle (:legacy); :kscycle is the robustness fallback.
+# ---------------------------------------------------------------------------
+const _KSCYCLE_NU = 8   # inner FCG iterations at an injected same-size level
+
+@inline _is_samesize(h::HierarchyLevel) = !h.islast && h.nc == h.n
+
+function kscycle!(
+    x::Vector{Float64},
+    H::Vector{HierarchyLevel},
+    W::Vector{KWorkspace},
+    lvl::Int64,
+    b::Vector{Float64},
+    krepeat::Vector{Int64},
+    inner_tol::Float64,
+    visits::Union{Nothing,Vector{Int64}},
+)
+    local h = H[lvl]
+
+    if visits !== nothing
+        visits[lvl] += 1
+    end
+
+    if h.islast
+        if !h.iterative
+            local nt = h.n - 1
+            fill!(x, 0.0)
+            @views ldiv!(x[1:nt], h.chol, b[1:nt])
+        else
+            x .= b .* h.invD
+        end
+        return x
+    end
+
+    local A = h.A
+    local invD = h.invD
+    local cI = h.cI
+    local tmp = W[lvl].tmp
+
+    # pre-smooth from zero initial guess
+    x .= b .* invD
+
+    # restricted residual and inner solve
+    mul!(tmp, A, x)
+    tmp .= b .- tmp
+    interpolate!(W[lvl+1].b, cI, tmp)
+
+    # A same-size (injected) level minimizes the inner FCG over this level's own
+    # A (the correct residual equation under the identity transfer) with
+    # _KSCYCLE_NU iterations; every other level is the standard K-cycle over the
+    # Galerkin next operator (so on a normal hierarchy kscycle! == kcycle!).
+    if _is_samesize(h)
+        inner_fcg_ks!(W[lvl+1].z, H, W, lvl, lvl, _KSCYCLE_NU,
+            W[lvl+1].b, krepeat, inner_tol, visits)
+    else
+        inner_fcg_ks!(W[lvl+1].z, H, W, lvl, lvl + 1, krepeat[lvl],
+            W[lvl+1].b, krepeat, inner_tol, visits)
+    end
+
+    # interpolate and post-smooth
+    prolongate_add!(x, cI, W[lvl+1].z)
+    mul!(tmp, A, x)
+    tmp .= b .- tmp
+    tmp .*= invD
+    x .+= tmp
+
+    return x
+end
+
+# FCG(1) coarse solve preconditioned by the recursive Ks-cycle, minimizing over
+# H[ac_level].A (the Galerkin next operator for a normal level, or the level's
+# own operator for a same-size level), capped at `nu` inner iterations. Uses the
+# W[lvl+1] buffers exactly as inner_fcg! does.
+function inner_fcg_ks!(
+    z::Vector{Float64},
+    H::Vector{HierarchyLevel},
+    W::Vector{KWorkspace},
+    lvl::Int64,
+    ac_level::Int64,
+    nu::Int64,
+    bc::Vector{Float64},
+    krepeat::Vector{Int64},
+    inner_tol::Float64,
+    visits::Union{Nothing,Vector{Int64}},
+)
+    local c = lvl + 1
+    local hac = H[ac_level]
+    local Ac = (hac.islast && !hac.iterative) ? hac.A_full : hac.A
+    local Wc = W[c]
+
+    fill!(z, 0.0)
+    copyto!(Wc.r, bc)
+
+    local bnorm2 = dot(Wc.r, Wc.r)
+    if bnorm2 == 0.0
+        return z
+    end
+    local stop2 = max(1e-28, inner_tol * inner_tol) * bnorm2
+
+    local dr_prev = 0.0
+    for i = 1:nu
+        if dot(Wc.r, Wc.r) <= stop2
+            break
+        end
+
+        kscycle!(Wc.d, H, W, c, Wc.r, krepeat, inner_tol, visits)
+
+        if i == 1
+            copyto!(Wc.p, Wc.d)
+        else
+            local num = dot(Wc.d, Wc.r) - dot(Wc.d, Wc.r_prev)
+            local beta = dr_prev != 0.0 ? num / dr_prev : 0.0
+            Wc.p .= Wc.d .+ beta .* Wc.p
+        end
+
+        mul!(Wc.q, Ac, Wc.p)
+        local pq = dot(Wc.p, Wc.q)
+        if pq <= 0.0
+            break
+        end
+
+        local rd = dot(Wc.r, Wc.d)
+        local alpha = rd / pq
+
+        dr_prev = rd
+        copyto!(Wc.r_prev, Wc.r)
+
+        axpy!(alpha, Wc.p, z)
+        axpy!(-alpha, Wc.q, Wc.r)
+    end
+
+    return z
+end
+
 ## outer solver
 
 """
@@ -283,10 +427,14 @@ Keyword arguments:
 - `tol = 1e-8`: relative residual tolerance.
 - `maxit = 500`: maximum outer iterations.
 - `cycle = :kcycle`: preconditioning cycle; `:kcycle` (inner flexible-CG
-  acceleration at the coarse levels) or `:legacy` (the classic stationary CMG
-  cycle, with which the outer loop reduces to plain PCG). `:vcycle` is accepted
-  as a deprecated alias of `:legacy` (the legacy cycle is a stationary
-  iteration, not a true geometric V-cycle).
+  acceleration at the coarse levels), `:legacy` (the classic stationary CMG
+  cycle, with which the outer loop reduces to plain PCG), or `:kscycle` (a
+  sparsify-aware K-cycle for `sparsify_on_stall = true` hierarchies, whose
+  inner FCG minimizes over each injected same-size level's own operator;
+  reduces to `:kcycle` when none were injected). `:vcycle` is a deprecated
+  alias of `:legacy` (the legacy cycle is a stationary iteration, not a true
+  geometric V-cycle). For a sparsified hierarchy prefer `:legacy` (fewest
+  matvecs) or `:kscycle` (robust); the stock `:kcycle` degrades there.
 - `theta = 0.75`: K-cycle work-budget cap (see `compute_kcycle_repeats`);
   `0.0` opts out into the fixed local repeat rule.
 - `inner_tol = 0.25`: adaptive stopping for the inner FCG iterations;
@@ -428,7 +576,8 @@ function fcg_solve!(
     # outer system is the full matrix
     local A = (H[1].islast && !H[1].iterative) ? H[1].A_full : H[1].A
     local n = size(A, 1)
-    local use_kcycle = cycle === :kcycle
+    # both K-cycles use the inner-FCG workspace; the legacy cycle uses its own
+    local use_kcycle = cycle === :kcycle || cycle === :kscycle
 
     local krepeat = Int64[]
     local W = KWorkspace[]
@@ -470,7 +619,9 @@ function fcg_solve!(
             break
         end
 
-        if use_kcycle
+        if cycle === :kscycle
+            kscycle!(d, H, W, 1, r, krepeat, inner_tol, visits)
+        elseif cycle === :kcycle
             kcycle!(d, H, W, 1, r, krepeat, inner_tol, visits)
         else
             # preconditioner_i returns its aliased top-level workspace buffer,
