@@ -19,6 +19,7 @@ on-stall build branch and the spanner/sparsify module are new.
 | `build.py` | `build_sparsified_hierarchy` — mirrors `pycmg._hierarchy.build_hierarchy`, forking only the stall guard (on the EDGE ratio) to inject a same-size sparsifier level. Imports pycmg internals. |
 | `validate.py` | the three guideline checks, run against the real aggregation/solver. |
 | `kscycle.py` | the adaptive **Ks-cycle** and an honest cycle comparison (`python3 kscycle.py`) — see the Cycles section. Imports the unchanged pycmg cycle primitives. |
+| `solve.py` | `sparsified_solve(levels, b, cycle=...)` — the three cycle branches (`l-cycle` default / `k-cycle` / `ks-cycle`). Maps to the pending Julia `sparsified_solve.jl`. |
 | `run.py` | thin entry point (`python3 run.py` → `validate.py`). |
 
 ## How to run
@@ -151,17 +152,32 @@ time.** Measured on chains of dense blobs (tol 1e-9):
   So "local L at the sparsify level" is the wrong granularity — it leaves the boundary
   with the K-cycle exactly where it hurts.
 
-**Conclusion / port-back recommendation.** Drive sparsified hierarchies with the
-**L-cycle** (`cycle = :legacy` in Julia) — it is the fewest matvecs and the fastest.
-The Ks-cycle was worth building because it *explains why*: the injected sparsifiers are
-already spectrally accurate (κ(A_sp⁻¹A) ≈ 4–6), so there is **nothing for the K-cycle's
-inner FCG to accelerate** — a single stationary apply per level is optimal, and every
-inner iteration is wasted work. The K-cycle's value (inner acceleration of a *poor*
-coarse operator) is exactly what a good sparsifier removes the need for. So on the
-Julia side: keep the sparsify path on the legacy cycle; do not special-case the K-cycle
-(it cannot beat the L-cycle here). The guidelines' "solve side needs no changes" holds
-for correctness and for the L-cycle; the K-cycle is simply the wrong tool for this
-hierarchy.
+### Choosing the cycle (`solve.py` — three branches)
+
+`sparsified_solve(levels, b, cycle=...)` exposes the three as separate branches; the
+default is the L-cycle. `python3 solve.py` runs all three.
+
+| `cycle=` | use it for | notes |
+|---|---|---|
+| **`"l-cycle"`** (default) | **sparsified hierarchies** (and non-sparsified) | recommended: fewest matvecs, fastest; runs sparsify levels unchanged |
+| `"k-cycle"` | **non-sparsified** hierarchies (`sparsify_on_stall=False`) | the stock Notay K-cycle; **degrades on sparsify levels** — don't use it there |
+| `"ks-cycle"` | **sparsified hierarchies, as a robustness fallback** | operator mode, `samesize_nu=8`; fixes the stock K-cycle's degradation, reliably converges, but ~2–3× the L-cycle's work |
+
+**Conclusion / port-back recommendation.** Default to the **L-cycle** (`cycle = :legacy`
+in Julia) for sparsified hierarchies — fewest matvecs, fastest — because the injected
+sparsifiers are already spectrally accurate (κ(A_sp⁻¹A) ≈ 4–6), so there is **nothing
+for the K-cycle's inner FCG to accelerate**: a single stationary apply per level is
+optimal, and every inner iteration is wasted work. **Keep the stock K-cycle for the
+non-sparsified path** (`sparsify_on_stall=False`), where it is unchanged and correct.
+**Keep the Ks-cycle (operator mode) available as a robustness fallback** for sparsified
+hierarchies: it special-cases the same-size level — its inner FCG minimizes over that
+level's *own* operator (not the sparsifier) and runs `samesize_nu` inner iterations —
+so it fixes the stock K-cycle's degradation and converges reliably even where the
+L-cycle might underperform, at the cost of more work. So three distinct branches, not
+one: `l-cycle` (default), `k-cycle` (non-sparsified), `ks-cycle` (sparsified fallback).
+The stock K-cycle is never the right tool *on* a sparsified hierarchy — use `ks-cycle`
+there instead. (The Ks-cycle *stationary* mode — "L locally at the sparsify level" — is
+kept in `kscycle.py` for study but is not a branch here: it can converge slowly, above.)
 - **Production CMG breaks down on the stall.** On the ill-conditioned chain, the
   standard `precondition(A).solve` FCG breaks down (`conv=False`, true_res 8.7e-5) — the
   "loses accuracy to the ill-conditioning" the reference describes — whereas the

@@ -118,7 +118,7 @@ def _inner_fcg_ks(levels, level, ac_level, nu, bc, krepeat, inner_tol, mode,
 
 
 def fcg_solve_ks(levels, b, tol=1e-8, maxiter=500, theta=0.75, inner_tol=0.25,
-                 mode="operator", samesize_nu=4):
+                 mode="operator", samesize_nu=8):
     """Outer flexible-CG driven by the Ks-cycle (a port of pycmg._solve.fcg_solve
     that calls kscycle). Operators are treated as SPD (is_sdd handled by the
     caller / not needed for the Laplacian+slack experiment). Returns
