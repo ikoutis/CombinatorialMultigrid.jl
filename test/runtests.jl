@@ -79,7 +79,91 @@ function tree_plus_offtree_adj(n::Int, k::Int)
     return A + sparse(I, J, V, n, n)
 end
 
+## dense / expander-like builders for sparsify-on-stall (the existing grid and
+## near-tree helpers coarsen fine and never stall aggregation). Ported from the
+## CMG-python experiments' graphs.py; return ADJACENCY (apply lap() to get L).
+
+# connected Erdos-Renyi blob (spanning tree + random edges to avgdeg), unit
+# weights -- dense enough (avgdeg >= 32) that the real aggregation stalls on it
+function dense_blob_adj(n::Int; avgdeg::Int = 32, seed::Int = 0)
+    local rng = MersenneTwister(seed)
+    local es = Set{Tuple{Int64,Int64}}()
+    for v = 2:n
+        local p = rand(rng, 1:v-1)
+        push!(es, (min(v, p), max(v, p)))
+    end
+    while length(es) < n * avgdeg ÷ 2
+        local u = rand(rng, 1:n)
+        local v = rand(rng, 1:n)
+        u != v && push!(es, (min(u, v), max(u, v)))
+    end
+    local I = Int64[]; local J = Int64[]; local V = Float64[]
+    for (u, v) in es
+        push!(I, u); push!(J, v); push!(V, 1.0)
+        push!(I, v); push!(J, u); push!(V, 1.0)
+    end
+    return sparse(I, J, V, n, n)
+end
+
+# chain of dense blobs joined by single weak bridges (nblobs-1 small cuts give
+# an ill-conditioned system that genuinely needs a multilevel preconditioner)
+function blob_chain_adj(nblobs::Int, blobn::Int; avgdeg::Int = 40, seed::Int = 7,
+                        wbridge::Float64 = 1e-2)
+    local rng = MersenneTwister(seed)
+    local I = Int64[]; local J = Int64[]; local V = Float64[]
+    for k = 0:nblobs-1
+        local off = k * blobn
+        local B = dense_blob_adj(blobn; avgdeg = avgdeg, seed = seed + k)
+        local rv = rowvals(B); local nz = nonzeros(B)
+        for j = 1:blobn, p in nzrange(B, j)
+            push!(I, rv[p] + off); push!(J, j + off); push!(V, nz[p])
+        end
+        if k > 0
+            local a = (k - 1) * blobn + rand(rng, 1:blobn)
+            local b = off + rand(rng, 1:blobn)
+            push!(I, a); push!(J, b); push!(V, wbridge)
+            push!(I, b); push!(J, a); push!(V, wbridge)
+        end
+    end
+    return sparse(I, J, V, nblobs * blobn, nblobs * blobn)
+end
+
+# two dense blobs joined by ONE weak (high-resistance) bridge
+function dense_blob_pair_bridge_adj(n::Int; avgdeg::Int = 32, seed::Int = 2,
+                                    wbridge::Float64 = 1e-3)
+    local h = n ÷ 2
+    local Ab = blockdiag(dense_blob_adj(h; avgdeg = avgdeg, seed = seed),
+                         dense_blob_adj(n - h; avgdeg = avgdeg, seed = seed + 100))
+    return Ab + sparse([1, h + 1], [h + 1, 1], [wbridge, wbridge], n, n)
+end
+
 const CMG = CombinatorialMultigrid
+
+# --- sparsify-on-stall analysis helpers ---
+# near-Laplacian SPD operator (Laplacian + tiny slack): makes the generalized
+# eigenproblem well posed for the kappa checks
+_spd(adj; slack::Float64 = 1e-8) =
+    lap(adj) + slack * sparse(1.0I, size(adj, 1), size(adj, 1))
+
+# generalized condition number kappa(M^-1 A) over the shared range
+function _gkappa(A, M)
+    local ev = eigvals(Symmetric(Matrix(A)), Symmetric(Matrix(M)))
+    ev = filter(x -> x > 1e-9, ev)
+    return maximum(ev) / minimum(ev)
+end
+
+# edge-reduction ratio m_c/m of one aggregate+contract step (the stall criterion)
+function _edge_ratio(A)
+    local n = size(A, 1)
+    local cI, nc = CMG.steiner_group(A, Array(diag(A)))
+    nc == 1 && return 0.0
+    local Ac = CMG.contract_coo(A, cI, nc)
+    local m = CMG.nnz_lower(A) - n
+    return m == 0 ? 0.0 : (CMG.nnz_lower(Ac) - nc) / m
+end
+
+# count injected same-size (identity-transfer) levels in a hierarchy
+_n_inject(H) = count(h -> !h.islast && h.nc == h.n, H)
 
 @testset "CombinatorialMultigrid" begin
 
@@ -598,6 +682,107 @@ const CMG = CombinatorialMultigrid
         local x_on, _ = cmg_solve(Ac, bc; split_components = true, maxit = 200, tol = 1e-8)
         local x_off, _ = cmg_solve(Ac, bc; split_components = false, maxit = 200, tol = 1e-8)
         @test x_on == x_off
+    end
+
+    @testset "sparsify-on-stall" begin
+        Random.seed!(202)
+
+        # 1. stall -> resume + spectral quality: a dense blob stalls on EDGES
+        # (contraction barely thins them); one adaptive sparsify lets aggregation
+        # resume with a spectrally-close sparsifier.
+        local A1 = _spd(dense_blob_adj(400; avgdeg = 32, seed = 1))
+        @test _edge_ratio(A1) >= 0.9                       # densification stall
+        local e0 = CMG.edges_of(A1)
+        local sp_e, _p = CMG.sparsify(400, e0; keep_frac = 0.5, rng = MersenneTwister(0))
+        local A1sp = CMG.sdd_from_edges(400, sp_e, CMG.slack_of(A1))
+        @test _edge_ratio(A1sp) < 0.9                      # aggregation resumes
+        @test length(e0) / length(sp_e) >= 1.8             # >= 1.8x fewer edges
+        @test _gkappa(A1, A1sp) < 50.0                     # spectrally close
+
+        # 2. the spanner is essential: on two blobs + one weak bridge, uniform-
+        # only sampling is far worse than spanner+uniform (it drops the bridge).
+        local A2 = _spd(dense_blob_pair_bridge_adj(400; avgdeg = 32, seed = 2,
+            wbridge = 1e-3); slack = 1e-10)
+        local e2 = CMG.edges_of(A2)
+        local span_k = sum(_gkappa(A2, CMG.sdd_from_edges(400,
+            CMG.sparsify(400, e2; rng = MersenneTwister(i))[1], CMG.slack_of(A2)))
+            for i = 1:4) / 4
+        local unif_k = begin
+            local rng = MersenneTwister(7); local acc = 0.0
+            for _ = 1:6
+                local kept = [(u, v, w / 0.25) for (u, v, w) in e2 if rand(rng) < 0.25]
+                acc += _gkappa(A2, CMG.sdd_from_edges(400, kept, CMG.slack_of(A2)))
+            end
+            acc / 6
+        end
+        @test span_k < 50.0
+        @test unif_k >= 20.0 * span_k                      # uniform-only far worse
+
+        # 3. off == stock: sparsify_on_stall=false is byte-identical to the stock
+        # build (same levels, same nnz/nc/islast, no injected level).
+        local Loff = lap(blob_chain_adj(6, 150; seed = 7))
+        local A_off = CMG.validateInput!(Loff)
+        local Hstock = CMG.build_hierarchy(Loff, A_off)
+        local Hoff = CMG.build_hierarchy(Loff, A_off; sparsify_on_stall = false)
+        @test length(Hstock) == length(Hoff)
+        @test all(a.nnz == b.nnz && a.nc == b.nc && a.islast == b.islast
+                  for (a, b) in zip(Hstock, Hoff))
+        @test _n_inject(Hoff) == 0
+
+        # 4. end-to-end, all three cycles, genuine Laplacian (b _|_ 1). The fork
+        # injects >= 1 same-size level and every driver converges.
+        local L4 = lap(blob_chain_adj(6, 150; seed = 7))
+        local Hon = CMG.build_hierarchy(L4, CMG.validateInput!(L4); sparsify_on_stall = true)
+        @test _n_inject(Hon) >= 1
+        local b4 = randn(size(L4, 1)); b4 .-= sum(b4) / length(b4)
+        for cyc in (:legacy, :kcycle, :kscycle)
+            local x, st = cmg_solve(L4, b4; sparsify_on_stall = true,
+                split_components = false, eliminate = false, cycle = cyc, tol = 1e-9, maxit = 1000)
+            @test st.converged
+            @test relres(L4, x, b4) < 1e-8
+        end
+
+        # 5. full SDD-augmented path: an SDD input (strictly-dominant rows) is
+        # augmented to a Laplacian; sparsify injects a Laplacian sparsifier and
+        # the ORIGINAL system is solved EXACTLY (not up to the null-space constant).
+        local L5 = lap(blob_chain_adj(6, 150; seed = 7))
+        local n5 = size(L5, 1)
+        local A5 = L5 + spdiagm(0 => [i % 7 == 0 ? 0.5 : 0.0 for i = 1:n5])
+        local b5 = randn(n5)                               # SDD: nonsingular
+        local xref = Matrix(A5) \ b5
+        for cyc in (:legacy, :kcycle, :kscycle)
+            local x, st = cmg_solve(A5, b5; sparsify_on_stall = true,
+                split_components = false, eliminate = false, cycle = cyc, tol = 1e-11, maxit = 1000)
+            @test st.converged
+            @test relres(A5, x, b5) < 1e-8
+            @test norm(x - xref) / norm(xref) < 1e-6       # exact
+        end
+
+        # 6. both spanners are connected, bounded-kappa sparsifiers.
+        local A6 = _spd(dense_blob_adj(400; avgdeg = 32, seed = 1))
+        local e6 = CMG.edges_of(A6)
+        local bs = CMG.spanner_baswana_sen(400, e6; rng = MersenneTwister(1))
+        local Gb = sparse([e[1] for e in bs], [e[2] for e in bs], ones(length(bs)), 400, 400)
+        @test maximum(CMG.components(Gb + Gb')) == 1       # Baswana-Sen connected
+        local gs = CMG.greedy_spanner(400, e6, 9.0)
+        local Gg = sparse([e[1] for e in gs], [e[2] for e in gs], ones(length(gs)), 400, 400)
+        @test maximum(CMG.components(Gg + Gg')) == 1       # greedy connected
+        local sp6, = CMG.sparsify(400, e6; spanner = :baswana_sen, rng = MersenneTwister(2))
+        @test length(sp6) < 0.9 * length(e6)
+        @test _gkappa(A6, CMG.sdd_from_edges(400, sp6, CMG.slack_of(A6))) < 50.0
+
+        # 7. composes with disconnected + eliminate (each component sparsified).
+        local n1 = 3 * 150
+        local Ad = blockdiag(lap(blob_chain_adj(3, 150; seed = 1)),
+                             lap(blob_chain_adj(3, 150; seed = 9)))
+        local nd = size(Ad, 1)
+        local bd = randn(nd)
+        bd[1:n1] .-= sum(bd[1:n1]) / n1
+        bd[n1+1:end] .-= sum(bd[n1+1:end]) / (nd - n1)
+        local xd, sd = cmg_solve(Ad, bd; sparsify_on_stall = true, cycle = :legacy,
+            tol = 1e-9, maxit = 1000)
+        @test sd.converged
+        @test relres(Ad, xd, bd) < 1e-7
     end
 
 end
