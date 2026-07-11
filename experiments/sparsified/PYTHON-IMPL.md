@@ -127,8 +127,16 @@ time.** Measured on chains of dense blobs (tol 1e-9):
   15–17) — the operator-consistent fix works — **but does 2–3× more total work**,
   because with two stacked same-size levels its `samesize_nu` inner iterations nest and
   it applies the finest operators far more often. Fewer iterations, more matvecs, slower.
-- The **Ks-cycle *stationary* mode** equals the L-cycle when stable but destabilizes
-  when a linear top mixes with nonlinear coarse levels (85 iters in one config).
+- The **Ks-cycle *stationary* mode** (L-cycle locally at the sparsify levels, K-cycle
+  at the normal levels) equals the L-cycle in some configs but is up to ~5× slower in
+  others (85 vs 15 iters). It does **not** destabilize — no breakdown, `r·d > 0` every
+  iteration; it just converges slowly. Cause, isolated by turning levels stationary one
+  at a time: the culprit is the **first normal (Galerkin) level directly below the
+  sparsify chain**. With that level on the K-cycle's inner FCG while the sparsify levels
+  above are stationary, the stationary/Krylov-accelerated *adjacency* composes badly
+  under the outer FCG(1); making just that one level stationary too restores 15 iters.
+  So "local L at the sparsify level" is the wrong granularity — it leaves the boundary
+  with the K-cycle exactly where it hurts.
 
 **Conclusion / port-back recommendation.** Drive sparsified hierarchies with the
 **L-cycle** (`cycle = :legacy` in Julia) — it is the fewest matvecs and the fastest.
