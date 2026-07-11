@@ -325,6 +325,8 @@ function cmg_solve(
     b::AbstractVector{<:Real};
     eliminate::Bool = true,
     split_components::Bool = true,
+    sparsify_on_stall::Bool = false,
+    sparsify_opts::SparsifyOptions = SparsifyOptions(),
     kwargs...,
 )
     if split_components
@@ -332,7 +334,8 @@ function cmg_solve(
         # is connected, so all existing build/grounding logic applies). On a
         # connected graph this returns nothing and we fall through unchanged.
         # Pass `split_components = false` to skip the check.
-        local DH = build_disconnected_hierarchy(A; eliminate = eliminate)
+        local DH = build_disconnected_hierarchy(A; eliminate = eliminate,
+            sparsify_on_stall = sparsify_on_stall, sparsify_opts = sparsify_opts)
         DH !== nothing && return cmg_solve(DH, b; kwargs...)
     end
     if eliminate
@@ -340,10 +343,12 @@ function cmg_solve(
         # reduced core. On near-tree inputs this is a large win; on inputs with
         # no low-degree structure it costs one extra O(n+m) pass and otherwise
         # matches the plain solve. Pass `eliminate = false` to skip it.
-        return cmg_solve(build_eliminated_hierarchy(A), b; kwargs...)
+        return cmg_solve(build_eliminated_hierarchy(A;
+            sparsify_on_stall = sparsify_on_stall, sparsify_opts = sparsify_opts), b; kwargs...)
     end
     local A_ = validateInput!(A)  # throws if not valid
-    cmg_solve(build_hierarchy(A, A_), b; kwargs...)
+    cmg_solve(build_hierarchy(A, A_; sparsify_on_stall = sparsify_on_stall,
+        sparsify_opts = sparsify_opts), b; kwargs...)
 end
 
 """

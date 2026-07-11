@@ -126,7 +126,8 @@ single-vertex component stores its diagonal for a direct solve; a larger
 component builds the normal (optionally degree-1/2-eliminated) hierarchy on its
 principal submatrix `A[idx, idx]`.
 """
-function build_disconnected_hierarchy(A::SparseMatrixCSC; eliminate::Bool = true)
+function build_disconnected_hierarchy(A::SparseMatrixCSC; eliminate::Bool = true,
+    sparsify_on_stall::Bool = false, sparsify_opts::SparsifyOptions = SparsifyOptions())
     # One O(n+m) pass on the sparsity pattern (values ignored; a stored diagonal
     # is a harmless self-loop). No `dropzeros` copy — that would allocate a full
     # second matrix on every solve; the only inputs it would guard against are
@@ -143,8 +144,11 @@ function build_disconnected_hierarchy(A::SparseMatrixCSC; eliminate::Bool = true
             blocks[k] = Float64(A[idx[1], idx[1]])
         else
             local Ab = A[idx, idx]
-            blocks[k] = eliminate ? build_eliminated_hierarchy(Ab) :
-                        build_hierarchy(Ab, validateInput!(Ab))
+            blocks[k] = eliminate ?
+                        build_eliminated_hierarchy(Ab; sparsify_on_stall = sparsify_on_stall,
+                            sparsify_opts = sparsify_opts) :
+                        build_hierarchy(Ab, validateInput!(Ab);
+                            sparsify_on_stall = sparsify_on_stall, sparsify_opts = sparsify_opts)
         end
     end
     return DisconnectedHierarchy([Vector{Int64}(s) for s in idxsets], blocks, size(A, 1))

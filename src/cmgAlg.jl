@@ -158,12 +158,15 @@ function cmg_preconditioner_lap(
     inner_tol::Float64 = 0.25,
     eliminate::Bool = false,
     split_components::Bool = true,
+    sparsify_on_stall::Bool = false,
+    sparsify_opts::SparsifyOptions = SparsifyOptions(),
 )
     local c = _canonical_cycle(cycle)
     if split_components
         # Disconnected input: solve each connected component independently. On a
         # connected graph this returns nothing and we fall through unchanged.
-        local DH = build_disconnected_hierarchy(A_lap; eliminate = eliminate)
+        local DH = build_disconnected_hierarchy(A_lap; eliminate = eliminate,
+            sparsify_on_stall = sparsify_on_stall, sparsify_opts = sparsify_opts)
         if DH !== nothing
             return (
                 b -> first(cmg_solve(DH, b; cycle = c, theta = theta, inner_tol = inner_tol)),
@@ -172,14 +175,17 @@ function cmg_preconditioner_lap(
         end
     end
     if eliminate
-        local EH = build_eliminated_hierarchy(A_lap)
+        local EH = build_eliminated_hierarchy(A_lap;
+            sparsify_on_stall = sparsify_on_stall, sparsify_opts = sparsify_opts)
         return (make_eliminated_preconditioner(EH, c, theta, inner_tol), EH)
     end
     local A_lap_ = validateInput!(A_lap)  # throws if not valid
     if c === :vcycle
-        return cmg_!(A_lap, A_lap_)
+        return cmg_!(A_lap, A_lap_; sparsify_on_stall = sparsify_on_stall,
+            sparsify_opts = sparsify_opts)
     else  # :kcycle
-        local H = build_hierarchy(A_lap, A_lap_)
+        local H = build_hierarchy(A_lap, A_lap_; sparsify_on_stall = sparsify_on_stall,
+            sparsify_opts = sparsify_opts)
         return (make_kcycle_preconditioner(H, theta, inner_tol), H)
     end
 end
@@ -188,17 +194,23 @@ function cmg_preconditioner_adj(A::SparseMatrixCSC; kwargs...)
     cmg_preconditioner_lap(_lap(A); kwargs...)
 end
 
-function build_hierarchy(A::T, A_::T)::Vector{HierarchyLevel} where {T<:SparseMatrixCSC}
+function build_hierarchy(A::T, A_::T; sparsify_on_stall::Bool = false,
+    sparsify_opts::SparsifyOptions = SparsifyOptions(),
+)::Vector{HierarchyLevel} where {T<:SparseMatrixCSC}
     local original_nnz = nnz(A)
     local H = Vector{HierarchyLevel}()
     local sflag::Bool = true
     local sd::Bool = size(A_, 1) > size(A, 1)
+    # sparsify-on-stall state (unused when the flag is off)
+    local injected::Int = 0
+    local rng = MersenneTwister(sparsify_opts.seed)
+    local base::Int = sparsify_on_stall ? sparsify_opts.base : 500
 
     # build up H
     local h_nnz::Int = 0
     while true
         local n = size(A_, 1)
-        if n < 500  # direct method for small size
+        if n < base  # direct method for small size
             local B = A_[1:n-1, 1:n-1]
             local ldlt = ldl(B)
             push!(
@@ -241,35 +253,104 @@ function build_hierarchy(A::T, A_::T)::Vector{HierarchyLevel} where {T<:SparseMa
         )
         # check for hierarchy stagnation for potentially bad reasons
         h_nnz += nnz(A_)
-        if (nc >= n - 1) || (h_nnz > 5 * original_nnz)  # stop, but keep the solver iterative
-            @warn "CMG convergence may be slow due to matrix density. Future versions of CMG will eliminate this problem."
-            hl.sd, hl.islast, hl.iterative = true, true, true
+        if !sparsify_on_stall
+            # ===== stock path (byte-identical to the pre-sparsify build) =====
+            if (nc >= n - 1) || (h_nnz > 5 * original_nnz)  # stop, but keep the solver iterative
+                @warn "CMG convergence may be slow due to matrix density. Future versions of CMG will eliminate this problem."
+                hl.sd, hl.islast, hl.iterative = true, true, true
+                push!(H, hl)
+                break
+            end
+
+            # Combinatorial contraction; equivalent to the sparse triple product
+            # below (kept for A/B toggling — see experiments/contraction/).
+            # local Rt = sparse(cI, 1:n, 1, nc, n) # ! take out double
+            # A_ = Rt * A * Rt'
+            A_ = contract_coo(A, cI, nc)
             push!(H, hl)
-            break
-        end
 
-        # Combinatorial contraction; equivalent to the sparse triple product
-        # below (kept for A/B toggling — see experiments/contraction/).
-        # local Rt = sparse(cI, 1:n, 1, nc, n) # ! take out double
-        # A_ = Rt * A * Rt'
-        A_ = contract_coo(A, cI, nc)
-        push!(H, hl)
+            if sflag
+                sd = true
+                sflag = false
+            end
 
-        if sflag
-            sd = true
-            sflag = false
-        end
-
-        if nc == 1
-            break
+            if nc == 1
+                break
+            end
+        else
+            # ===== sparsify-on-stall path =====
+            # port: CMG-python build_sparsified_hierarchy (_hierarchy.py).
+            # Criterion B: cumulative operator-complexity budget (the same 5x
+            # guard, now nnz_budget). Backstops sparsification too timid to
+            # control density; nnz_budget = Inf disables it.
+            if h_nnz > sparsify_opts.nnz_budget * original_nnz
+                @warn "CMG convergence may be slow due to matrix density. Future versions of CMG will eliminate this problem."
+                hl.sd, hl.islast, hl.iterative = true, true, true
+                push!(H, hl)
+                break
+            end
+            # Criterion A: per-level EDGE stall (not node count). Densification
+            # is what CMG cannot escape -- contraction fill keeps ~as many edges
+            # even as nodes merge; a level is productive iff contraction reduces
+            # the edge count below stall_ratio * m.
+            local A_c = contract_coo(A, cI, nc)
+            local m = nnz_lower(A_) - n            # lower-tri off-diagonals = edges
+            local m_c = nnz_lower(A_c) - nc
+            if m == 0 || m_c <= sparsify_opts.stall_ratio * m
+                # productive: coarsen as usual (reuse the contraction just built)
+                A_ = A_c
+                push!(H, hl)
+                if sflag
+                    sd = true
+                    sflag = false
+                end
+                if nc == 1
+                    break
+                end
+            elseif injected < sparsify_opts.max_inject
+                # STALL: inject a same-size spanner+sparsifier level (identity
+                # transfer cI = 1:n, nc = n; flows through the cycles unchanged)
+                # and continue on the sparser operator.
+                local e0 = edges_of(A_)
+                local Bn = sparsify_opts.bundles_growth ?
+                           sparsify_opts.bundles + injected : sparsify_opts.bundles
+                local sp_e, _p = sparsify(n, e0; t = sparsify_opts.t, bundles = Bn,
+                    keep_frac = sparsify_opts.keep_frac, spanner = sparsify_opts.spanner,
+                    k = sparsify_opts.k, rng = rng)
+                if length(sp_e) < 0.98 * length(e0)   # sparsifier actually reduced
+                    push!(H, HierarchyLevel(
+                        sd = sd, islast = false, iterative = true,
+                        A = A_, invD = invD, cI = collect(Int64, 1:n), nc = n,
+                        n = n, nnz = nnz(A_), chol = ldl([1.0 0; 0 1.0]),
+                    ))
+                    A_ = sdd_from_edges(n, sp_e, slack_of(A_))
+                    injected += 1
+                    if sflag
+                        sd = true
+                        sflag = false
+                    end
+                else
+                    # couldn't reduce -> terminal iterative base (the stalled CMG)
+                    hl.sd, hl.islast, hl.iterative = true, true, true
+                    push!(H, hl)
+                    break
+                end
+            else
+                # max_inject reached -> terminal iterative base
+                hl.sd, hl.islast, hl.iterative = true, true, true
+                push!(H, hl)
+                break
+            end
         end
     end
 
     return H
 end
 
-function cmg_!(A::T, A_::T) where {T<:SparseMatrixCSC}
-    local H = build_hierarchy(A, A_)
+function cmg_!(A::T, A_::T; sparsify_on_stall::Bool = false,
+    sparsify_opts::SparsifyOptions = SparsifyOptions()) where {T<:SparseMatrixCSC}
+    local H = build_hierarchy(A, A_; sparsify_on_stall = sparsify_on_stall,
+        sparsify_opts = sparsify_opts)
 
     X = init_LevelAux(H)
     W = init_Workspace(H)

@@ -388,6 +388,8 @@ const ELIM_MIN_FRAC = 0.01
 function build_eliminated_hierarchy(
     A_lap::SparseMatrixCSC;
     min_frac::Float64 = ELIM_MIN_FRAC,
+    sparsify_on_stall::Bool = false,
+    sparsify_opts::SparsifyOptions = SparsifyOptions(),
 )::EliminatedHierarchy
     local n = size(A_lap, 1)
 
@@ -398,7 +400,8 @@ function build_eliminated_hierarchy(
     local cand, is_lap = scan_deg12(A_lap)
     if cand < max(2, ceil(Int, min_frac * n))
         local A_ = validateInput!(A_lap)
-        local H = build_hierarchy(A_lap, A_)
+        local H = build_hierarchy(A_lap, A_; sparsify_on_stall = sparsify_on_stall,
+            sparsify_opts = sparsify_opts)
         return EliminatedHierarchy(ElimSequence(), collect(Int64, 1:n), n, H, A_lap, is_lap)
     end
 
@@ -409,7 +412,8 @@ function build_eliminated_hierarchy(
     local H = HierarchyLevel[]
     if length(ind) >= 2
         local A_red_ = validateInput!(A_red)   # reuses SDD augmentation
-        H = build_hierarchy(A_red, A_red_)
+        H = build_hierarchy(A_red, A_red_; sparsify_on_stall = sparsify_on_stall,
+            sparsify_opts = sparsify_opts)
     end
     return EliminatedHierarchy(elims, ind, n, H, A_red, is_lap_e)
 end
