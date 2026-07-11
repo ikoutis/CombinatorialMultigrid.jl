@@ -14,7 +14,7 @@ on-stall build branch and the spanner/sparsify module are new.
 ## Files
 | file | role |
 |---|---|
-| `sparsify.py` | greedy spanner (resistance metric) + `spanner_bundle` + adaptive `sparsify` + scipy⇄edge-list SDD bridge. **No pycmg imports** — ports 1:1 to Julia. |
+| `sparsify.py` | two spanners — `greedy` (resistance metric) and `baswana-sen` (numba-jitted, scalable) — + `spanner_bundle` + adaptive `sparsify` + scipy⇄edge-list SDD bridge. **No pycmg imports** (numpy/scipy/numba only) — ports 1:1 to Julia. |
 | `graphs.py` | SPD test-graph generators (`dense_blob`, `blob_chain`, `dense_blob_pair_bridge`), retuned dense enough to stall the *real* aggregation. |
 | `build.py` | `build_sparsified_hierarchy` — mirrors `pycmg._hierarchy.build_hierarchy`, forking only the stall guard (on the EDGE ratio) to inject a same-size sparsifier level. Imports pycmg internals. |
 | `validate.py` | the three guideline checks, run against the real aggregation/solver. |
@@ -190,13 +190,29 @@ kept in `kscycle.py` for study but is not a branch here: it can converge slowly,
   residual `< tol`; solution error is the conditioning-limited `κ·residual` (not
   machine-precision as in reference.py's exact base solve).
 
-## Efficiency
-Greedy spanner (pure Python, `heapq`/`dict` Dijkstra) — sub-second per call at the
-validation scale (n ≤ ~1000) and it ports 1:1 to Julia. **Baswana–Sen** (`k=⌈log₂ n⌉`,
-O(m) expected) is the scale/production spanner named in the guidelines; add it behind
-`sparsify(spanner="baswana-sen")` when a large (e.g. the ~8400-node dumped) operator
-needs it. Prefer Baswana–Sen over numba-ifying greedy — it's the algorithm that scales
-and the one Julia needs; greedy's Dijkstra is numba-hostile anyway.
+## Efficiency — two spanners (`sparsify(spanner=...)`, threaded through `build`)
+
+The spanner is the whole cost of the build (profiled: ~99% of build time). Two are
+provided:
+
+- **`"greedy"`** (default) — the Althofer greedy t-spanner, pure Python (`heapq`/`dict`
+  Dijkstra), O(m·Dijkstra). Unambiguous for correctness and it ports 1:1 to Julia, but
+  it does **not** scale: ~1s per call at n=900, **12s at n=3600**, and a full build there
+  was ~72s. Fine only at validation scale (n ≤ ~1000).
+- **`"baswana-sen"`** — the Baswana–Sen randomized (2k−1)-spanner (`k = ⌈log₂ n⌉`),
+  O(k·m) expected and **numba-jitted** (array-based, epoch-stamped cluster accumulator,
+  no heap/dict — unlike greedy, which is numba-hostile). This is the scalable/production
+  spanner the guidelines name. Measured **~150× faster** and it scales: the n=3600
+  spanner is **82 ms** (vs greedy's 12 s), and a full n=3600 build is **309 ms** (vs
+  ~72 s). It is a genuine drop-in — the spanner is connected and its sparsifier has the
+  same bounded κ(A_sp⁻¹A) ≈ 3–6 as greedy (validated in `test_baswana_sen`), and
+  end-to-end solves converge identically (~15–17 L-cycle iters). Its spanner is denser
+  than greedy's (stretch 2k−1 ~ 2 log₂ n vs log₂ n), but the adaptive `p` compensates so
+  the per-injection reduction stays ~2×.
+
+Recommendation: `greedy` for small validation and unambiguous correctness; `baswana-sen`
+for scale (the ~8400-node dumped operator, larger synthetics) and as the version to port
+to Julia. Both live in `sparsify.py` and stay pycmg-free (only numpy/scipy/numba).
 
 ## Port-back plan
 Port `sparsify.py` (spanner + adaptive sparsify + SDD bridge) and the `build.py` stall

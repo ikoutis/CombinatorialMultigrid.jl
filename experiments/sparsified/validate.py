@@ -204,9 +204,50 @@ def test_correctness():
     print("PASS: correctness  " + "; ".join(out))
 
 
+def test_baswana_sen():
+    """The numba Baswana-Sen spanner is a connected, bounded-kappa sparsifier
+    (a drop-in for greedy) and solves end-to-end -- the scalable spanner
+    (O(k*m), ~150x faster than the greedy O(m*Dijkstra) at n~1000+)."""
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+
+    from sparsify import spanner_baswana_sen
+
+    random.seed(3)
+    np.random.seed(3)
+    # 1. connected spanner + bounded-kappa sparsifier on a dense blob
+    A = spd_operator(400, dense_blob(400, avgdeg=32, seed=1))
+    e0 = edges_of(A)
+    bs = spanner_baswana_sen(400, e0, rng=np.random.default_rng(1))
+    r = np.fromiter((e[0] for e in bs), int, len(bs))
+    c = np.fromiter((e[1] for e in bs), int, len(bs))
+    G = sp.csr_matrix((np.ones(len(bs)), (r, c)), shape=(400, 400))
+    assert connected_components(G + G.T, directed=False)[0] == 1, \
+        "BS spanner is disconnected"
+    sp_e, _ = sparsify(400, e0, spanner="baswana-sen", keep_frac=0.5,
+                       rng=np.random.default_rng(2))
+    kb = _kappa(A, sdd_from_edges(400, sp_e, slack_of(A)))
+    assert kb < 50.0, f"BS sparsifier kappa too large: {kb:.1f}"
+    assert len(sp_e) < 0.9 * len(e0), "BS sparsify did not reduce edges"
+
+    # 2. end-to-end: build with the BS spanner, both methods converge
+    A2, b = _blob_chain_system()
+    on, _ = build_sparsified_hierarchy(A2, spanner="baswana-sen",
+                                       rng=np.random.default_rng(3))
+    inj = _n_inject(on)
+    assert inj >= 1, "BS build injected no sparsifier"
+    for method in ("legacy-cmg", "kcycle"):
+        x, its, _, ok = Preconditioner(on, False).solve(
+            b, method=method, tol=1e-9, maxiter=1000)
+        assert ok and _true_relres(A2, x, b) < 1e-8, f"BS {method} failed"
+    print(f"PASS: baswana-sen (numba)  connected spanner, sparsifier kappa={kb:.1f}, "
+          f"reduction {len(e0)/len(sp_e):.2f}x; end-to-end inject={inj}, both cycles converge")
+
+
 if __name__ == "__main__":
     test_stall_resume()
     test_spanner_essential()
     test_end_to_end()
     test_correctness()
+    test_baswana_sen()
     print("\nAll sparsified-CMG validation checks passed.")

@@ -8,4 +8,5 @@ if __name__ == "__main__":
     validate.test_spanner_essential()
     validate.test_end_to_end()
     validate.test_correctness()
+    validate.test_baswana_sen()
     print("\nAll sparsified-CMG validation checks passed.")

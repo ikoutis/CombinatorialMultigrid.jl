@@ -48,7 +48,8 @@ def _set_repeats(levels, flag_iterative):
 def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
                                bundles=1, t=None, stall_ratio=0.9,
                                max_inject=10, base=700, nnz_budget=5.0,
-                               bundles_growth=False, rng=None):
+                               spanner="greedy", k=None, bundles_growth=False,
+                               rng=None):
     """Build a CMG hierarchy, optionally injecting a sparsifier level on stall.
     Returns (levels, is_sdd=False).
 
@@ -69,8 +70,10 @@ def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
          build stops. Set `nnz_budget=inf` to disable this criterion.
 
     Other knobs mirror the guidelines: `keep_frac` (adaptive sparsifier target
-    keep-fraction), `bundles` (spanner bundles), `t` (spanner stretch, default
-    log2(n)), `base` (direct-solve threshold, 700 as in CMG). Operators are
+    keep-fraction), `bundles` (spanner bundles), `t` (greedy spanner stretch,
+    default log2(n)), `spanner` ("greedy" default, or "baswana-sen" -- the
+    numba-jitted O(k*m) scalable spanner; `k` = its stretch parameter, default
+    ceil(log2 n)), `base` (direct-solve threshold, 700 as in CMG). Operators are
     treated as SPD (Laplacian + slack); is_sdd is False.
     """
     A = A.tocsr()
@@ -135,7 +138,7 @@ def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
             e0 = edges_of(A)
             B = bundles + injected if bundles_growth else bundles
             sp_e, p = sparsify(n, e0, t=t, bundles=B, keep_frac=keep_frac,
-                               rng=rng)
+                               spanner=spanner, k=k, rng=rng)
             if len(sp_e) < 0.98 * len(e0):        # sparsifier actually reduced
                 A_sp = sdd_from_edges(n, sp_e, slack_of(A))
                 levels.append(HierarchyLevel(
