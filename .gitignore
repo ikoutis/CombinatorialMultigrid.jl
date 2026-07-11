@@ -22,3 +22,7 @@ docs/site/
 # committed for packages, but should be committed for applications that require a static
 # environment.
 Manifest.toml
+
+# Python bytecode caches from the experiments/ prototype/reference scripts
+__pycache__/
+*.pyc
