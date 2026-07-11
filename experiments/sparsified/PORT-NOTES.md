@@ -1,15 +1,17 @@
 # Julia port notes — sparsify-on-stall
 
 > **Post-benchmark changes (supersede the 1:1 port below).** The 10⁶-chimera
-> benchmark showed the ported edge-ratio trigger fired on normal levels, adding a
-> large fixed overhead on non-stalling graphs. Three fixes were applied to the
-> Julia port; the current behavior is:
-> 1. **Trigger** (`src/cmgAlg.jl` `build_hierarchy`): sparsify no longer uses the
->    per-level edge-stall test (`m_c ≤ stall_ratio·m`). It coarsens with the
->    *stock* node criterion and only sparsifies at the stock stagnation point —
->    the same `nc ≥ n-1` / `h_nnz > nnz_budget·original_nnz` guard stock CMG warns
->    on. A graph that coarsens to `base` pays **zero** sparsify overhead (identical
->    to the stock hierarchy). `stall_ratio` is now unused/deprecated.
+> benchmark showed the ported trigger fired on normal levels, adding a large
+> fixed overhead on non-stalling graphs. Three fixes were applied to the Julia
+> port; the current behavior is:
+> 1. **Trigger** (`src/cmgAlg.jl` `build_hierarchy`) — **nodes-vs-edges port
+>    bug.** The validated reference (`reference.py`, `PYTHON-GUIDELINES.md`) uses a
+>    NODE-coarsening stall test — productive iff `nc ≤ stall_ratio·n` — but the
+>    Julia port tested EDGES (`m_c ≤ stall_ratio·m`), which fires on normal
+>    chimera levels that coarsen nodes well yet keep edges (contraction fill).
+>    Corrected to the node ratio. A graph that coarsens normally never sparsifies
+>    → **zero** overhead, ~the stock hierarchy; only a genuine node plateau
+>    (`nc > stall_ratio·n`) injects. `nnz_budget` remains a hard density cap.
 > 2. **Defaults** (`src/sparsify.jl`): `keep_frac = 0.25` (was 0.5), `bundles = 2`
 >    (was 1).
 > 3. **kscycle** (`src/kcycle.jl`): the injected same-size level uses the standard

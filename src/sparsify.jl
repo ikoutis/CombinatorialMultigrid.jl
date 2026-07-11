@@ -19,10 +19,12 @@ validated in the CMG-python package.
 - `keep_frac`  : target keep-fraction for off-bundle edges (0.25 -> C_op ~ 1.25).
 - `bundles`    : number of peeled spanners kept at full weight (default 2).
 - `t`          : greedy-spanner stretch; `nothing` -> `max(2, log2 n)` per level.
-- `stall_ratio`: DEPRECATED / unused. Sparsification now triggers at the stock
-                 node/nnz stagnation point (the same `nc >= n-1` /
-                 `nnz_budget * original_nnz` guard stock CMG warns on), not on a
-                 per-level edge ratio. Kept only for struct compatibility.
+- `stall_ratio`: per-level NODE-coarsening threshold; a level is productive iff
+                 aggregation drops the node count below `stall_ratio * n`
+                 (`nc > stall_ratio * n` is a stall -> sparsify). This is the
+                 validated CMG-python criterion; the original Julia port
+                 mistakenly tested edges (`m_c <= stall_ratio*m`), which fired on
+                 normal levels -- corrected to nodes here.
 - `max_inject` : cap on injected sparsifier levels (guarantees termination).
 - `nnz_budget` : cumulative operator-complexity budget, a multiple of input nnz
                  (the same 5x guard stock CMG uses). `Inf` disables it.
@@ -37,10 +39,9 @@ Base.@kwdef struct SparsifyOptions
     keep_frac::Float64 = 0.25
     bundles::Int = 2
     t::Union{Nothing,Float64} = nothing
-    stall_ratio::Float64 = 0.9   # DEPRECATED: unused since the stall trigger
-                                 # switched to the stock node/nnz stagnation
-                                 # criterion (build_hierarchy). Kept for struct
-                                 # compatibility; has no effect.
+    stall_ratio::Float64 = 0.9   # NODE-coarsening threshold: a level is
+                                 # productive iff aggregation drops nc below
+                                 # stall_ratio*n; nc > stall_ratio*n is a stall.
     max_inject::Int = 10
     nnz_budget::Float64 = 5.0
     spanner::Symbol = :baswana_sen

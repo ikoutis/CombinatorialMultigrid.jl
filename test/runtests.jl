@@ -153,9 +153,9 @@ function _gkappa(A, M)
 end
 
 # edge-reduction ratio m_c/m of one aggregate+contract step. (A densification
-# DIAGNOSTIC: ~1 means contraction barely thins the edges. NB: this is no longer
-# the build's stall trigger -- sparsification now fires at the stock node/nnz
-# stagnation point, see build_hierarchy.)
+# DIAGNOSTIC: ~1 means contraction barely thins the edges. NB: this is NOT the
+# build's stall trigger -- sparsification fires on the NODE-coarsening ratio
+# (nc > stall_ratio*n), not this edge ratio; see build_hierarchy.)
 function _edge_ratio(A)
     local n = size(A, 1)
     local cI, nc = CMG.steiner_group(A, Array(diag(A)))
@@ -735,9 +735,9 @@ _n_inject(H) = count(h -> !h.islast && h.nc == h.n, H)
         @test _n_inject(Hoff) == 0
 
         # 4. end-to-end, all three cycles, genuine Laplacian (b _|_ 1). A dense
-        # blob-chain densifies under contraction, so the build reaches the stock
-        # stagnation point (nnz budget / nc>=n-1), injects >= 1 same-size level
-        # there, and every driver converges.
+        # blob-chain plateaus in node count under aggregation (nc/n stays high,
+        # > stall_ratio), so the build injects >= 1 same-size sparsifier level and
+        # every driver converges.
         local L4 = lap(blob_chain_adj(6, 150; seed = 7))
         local Hon = CMG.build_hierarchy(L4, CMG.validateInput!(L4); sparsify_on_stall = true)
         @test _n_inject(Hon) >= 1
