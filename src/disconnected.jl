@@ -127,8 +127,12 @@ component builds the normal (optionally degree-1/2-eliminated) hierarchy on its
 principal submatrix `A[idx, idx]`.
 """
 function build_disconnected_hierarchy(A::SparseMatrixCSC; eliminate::Bool = true)
-    local comp = components(dropzeros(A))    # pattern-only; drop stored zeros so
-                                             # a zero entry cannot bridge components
+    # One O(n+m) pass on the sparsity pattern (values ignored; a stored diagonal
+    # is a harmless self-loop). No `dropzeros` copy — that would allocate a full
+    # second matrix on every solve; the only inputs it would guard against are
+    # stored off-diagonal zeros bridging components, which lap/SDDM inputs never
+    # have, and which would merely fall back to the connected path anyway.
+    local comp = components(A)
     local nc = Int(maximum(comp))
     nc == 1 && return nothing
     local idxsets = vecToComps(comp)
