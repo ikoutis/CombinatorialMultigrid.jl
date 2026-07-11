@@ -57,6 +57,19 @@ correctness   : chain + single blob, both methods, true residual < 1e-8
   the 0.9 default). Denser blobs are injected repeatedly until productive — the build
   handles this automatically (bounded by `max_inject` and the 0.98 reduction gate →
   termination; each productive step strictly drops edges, so the loop terminates).
+- **Two stopping criteria, both applied (`sparsify_on_stall` on/off knob).** Recursion
+  stops on EITHER: **(A)** the per-level edge stall above — with sparsification on, a
+  stall injects a sparsifier and continues (with it off, a stall terminates, as stock
+  CMG does); or **(B)** a cumulative operator-complexity budget `cumulative_nnz >
+  nnz_budget · nnz(input)` (default `nnz_budget = 5`, the pycmg value). (B) bounds
+  per-cycle work/memory and **backstops timid sparsification**: at `keep_frac = 0.5`
+  each sparsifier ~halves the edges so the injected chain sums to C_op ≈ 2 (geometric
+  `1/(1−keep_frac)`) and (B) never fires; as `keep_frac → 1` the injections barely thin
+  the graph, C_op climbs toward `1/(1−keep_frac)`, and (B) stops the build instead of
+  stacking `max_inject` useless levels (measured: `keep_frac 0.9` → C_op ≈ 5.3, stops at
+  6 injections vs 10). `nnz_budget = inf` disables (B). This restores pycmg's
+  `cumulative_nnz > 5·initial_nnz` guard (which the first cut had dropped), now counting
+  the sparsifiers' nnz and sitting beside the edge-stall as the two termination rules.
 - **Same-size identity-transfer level needs zero solver changes.** A sparsify level has
   `cluster_indices = arange(n)`, `num_clusters = n`, `R = n×n identity`; `pycmg`'s
   cycles restrict/prolong with `R @ r` / `R.T @ z` (identity matmul) and pick up the

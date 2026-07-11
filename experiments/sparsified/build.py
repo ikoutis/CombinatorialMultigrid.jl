@@ -47,27 +47,38 @@ def _set_repeats(levels, flag_iterative):
 
 def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
                                bundles=1, t=None, stall_ratio=0.9,
-                               max_inject=10, base=700, bundles_growth=False,
-                               rng=None):
-    """Build a CMG hierarchy that injects a sparsifier level on aggregation
-    stall. Returns (levels, is_sdd=False).
+                               max_inject=10, base=700, nnz_budget=5.0,
+                               bundles_growth=False, rng=None):
+    """Build a CMG hierarchy, optionally injecting a sparsifier level on stall.
+    Returns (levels, is_sdd=False).
 
-    Parameters mirror the guideline knobs: `keep_frac` (target keep-fraction of
-    the adaptive sparsifier), `bundles` (spanner bundles), `t` (spanner stretch,
-    default log2(n) per level), `stall_ratio` (a level is "productive" iff
-    contraction reduces the EDGE count below stall_ratio*m; at/above it the
-    level densifies -> a stall), `max_inject` (hard cap on injections ->
-    termination), `base` (direct-solve threshold, 700 as in CMG). Operators are
+    The `sparsify_on_stall` knob (True/False) turns sparsification on or off.
+    Recursion stops on BOTH criteria (as in pycmg's build, generalized):
+
+      A. per-level EDGE stall -- a level is "productive" iff contraction reduces
+         the edge count below `stall_ratio*m` (m = lower-tri off-diagonals). At
+         or above it the level densified (contraction fill / expander) and did
+         not get cheaper. With `sparsify_on_stall=True` a stall injects a
+         same-size sparsifier and continues (up to `max_inject`); with False it
+         terminates, as stock CMG does at a stall.
+      B. cumulative OPERATOR-COMPLEXITY budget -- if the stored work summed over
+         all levels exceeds `nnz_budget * nnz(input)` (default 5x, the pycmg
+         value), stop. This bounds per-cycle work/memory and backstops
+         sparsification that is too timid to control density (e.g. keep_frac
+         near 1): rather than stacking `max_inject` barely-reducing levels, the
+         build stops. Set `nnz_budget=inf` to disable this criterion.
+
+    Other knobs mirror the guidelines: `keep_frac` (adaptive sparsifier target
+    keep-fraction), `bundles` (spanner bundles), `t` (spanner stretch, default
+    log2(n)), `base` (direct-solve threshold, 700 as in CMG). Operators are
     treated as SPD (Laplacian + slack); is_sdd is False.
-
-    The stall is keyed on EDGES, not nodes: densification (contraction fill /
-    expander levels) is what CMG cannot escape -- nodes may merge while the edge
-    count, hence per-iteration cost and hierarchy depth, does not fall.
     """
     A = A.tocsr()
     levels = []
     injected = 0
     flag_iterative = False
+    initial_nnz = nnz_lower(A)                     # criterion B baseline
+    cumulative_nnz = 0
 
     while True:
         n = A.shape[0]
@@ -93,13 +104,23 @@ def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
             flag_iterative = True
             break
 
-        # (c) contract, then decide on the EDGE ratio, not the node ratio.
-        # The stall CMG cannot escape is DENSIFICATION: contraction fill (or an
-        # expander-like level) keeps ~as many edges even as nodes merge, so the
-        # coarse operator is no cheaper -- that is what balloons hierarchy depth
-        # and per-iteration cost, and what the sparsifier targets. A level is
-        # productive iff contraction actually reduces the edge count; node count
-        # can look productive (nc < n) while density, hence work, does not fall.
+        # --- criterion B: cumulative operator-complexity budget (both modes) ---
+        # If total stored work over all levels exceeds nnz_budget x the input's
+        # nnz, stop. Sparsification keeps this ~2 at keep_frac=0.5; it only trips
+        # when sparsification is too timid (keep_frac near 1) or off on a
+        # densifying input -- exactly when giving up is right.
+        cumulative_nnz += level.nnz_lo
+        if cumulative_nnz > nnz_budget * initial_nnz:
+            level.is_last = True
+            level.iterative = True
+            levels.append(level)
+            flag_iterative = True
+            break
+
+        # --- criterion A: per-level EDGE stall (not node count) ---
+        # Densification is what CMG cannot escape: contraction fill keeps ~as
+        # many edges even as nodes merge, so the coarse operator is no cheaper.
+        # A level is productive iff contraction actually reduces the edge count.
         A_c = contract_coo(A, cI, nc)
         m = nnz_lower(A) - n                       # lower-tri off-diagonals = edges
         m_c = nnz_lower(A_c) - nc
