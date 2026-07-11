@@ -31,11 +31,19 @@ Consequence: the experiment is a **forked build loop + spanner/sparsify code**,
 reusing the production solve verbatim. Production `src/` is untouched.
 
 ## Files
-- `prototype.py` — NumPy/SciPy **spectral gate** (below). Run: `python3 prototype.py`.
-- `spanner.jl`, `sparsify.jl`, `build_sparsified_hierarchy.jl`,
-  `sparsified_solve.jl`, `runtests.jl`, `bench.jl` — the Julia experiment
-  (pending; see the plan). Baswana–Sen spanner (`k=log n`) is the production
-  spanner; the prototype uses a greedy spanner for unambiguous correctness.
+- `prototype.py` — NumPy/SciPy **spectral gate** (below): validates that
+  spanner+uniform is a bounded-κ sparsifier and that the spanner is essential.
+  Run: `python3 prototype.py`.
+- `reference.py` — **runnable executable spec** of the full algorithm: a minimal
+  aggregation-AMG that reproduces the stall and demonstrates sparsify-on-stall
+  end-to-end (adaptive-p, bundle iteration, same-size identity-transfer level).
+  Run: `python3 reference.py`.
+- `PYTHON-GUIDELINES.md` — spec/guidelines for implementing this in a Python CMG
+  (cmg-python), written against `reference.py`.
+- (pending) Julia `spanner.jl` / `sparsify.jl` / `build_sparsified_hierarchy.jl`
+  / `sparsified_solve.jl` / `runtests.jl` / `bench.jl`. Baswana–Sen (`k=log n`)
+  is the production spanner; the Python uses a greedy spanner for unambiguous
+  correctness.
 
 ## Gate results (prototype.py)
 Spanner in the resistance metric (edge length = 1/conductance): a t-spanner
@@ -55,9 +63,19 @@ density-growing reduction — the primitive works. κ at moderate density (~30�
 is a tuning surface (sampling rate `p`, spanner stretch, number of spanner
 bundles) that the exact construction tightens; it does not block the approach.
 
+## Reference results (reference.py)
+On a chain of 8 dense blobs joined by weak cuts (effective κ ≈ 2.6e7):
+- **Stall → resume:** aggregation `nc/n` = 0.998 (stall) → 0.63 (bundles=1) /
+  0.39 (bundles=2) after one adaptive sparsify (2× fewer edges), with the
+  sparsifier κ(M⁻¹A) ≈ 21. More bundles → aggregation resumes harder.
+- **End-to-end:** V-cycle-PCG stalls without the fix (~50 iters, accuracy lost to
+  the ill-conditioning); with sparsify-on-stall it coarsens 960→~20 and converges
+  in ~12 iters. The gap grows with κ/scale. Solution matches a direct solve.
+
 ## Status
-Gate **passed** → the Julia experiment (forked build injecting sparsify levels,
-reusing the solve) is justified. The true "aggregation resumes" test and the
-end-to-end win vs `cmg-k-elim`/`ac` on the known stalled instances
-(`uni_chimera(1e6,10)`, `wted_chimera(1e6,5)`) happen in the Julia build + Wulver
-bench.
+Gate + executable reference **done and validated in Python**. Next: implement in
+cmg-python per `PYTHON-GUIDELINES.md` (fast iteration; I can run Python here,
+not Julia), then port the validated algorithm to the Julia CMG and bench on
+Wulver vs `cmg-k-elim`/`ac` on `uni_chimera(1e6,10)`, `wted_chimera(1e6,5)`.
+No chimera generator is needed on the Python side — synthetic stalls suffice, or
+dump one real stalled operator from a Julia run.
