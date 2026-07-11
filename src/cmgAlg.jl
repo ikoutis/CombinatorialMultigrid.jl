@@ -157,8 +157,20 @@ function cmg_preconditioner_lap(
     theta::Float64 = 0.75,
     inner_tol::Float64 = 0.25,
     eliminate::Bool = false,
+    split_components::Bool = true,
 )
     local c = _canonical_cycle(cycle)
+    if split_components
+        # Disconnected input: solve each connected component independently. On a
+        # connected graph this returns nothing and we fall through unchanged.
+        local DH = build_disconnected_hierarchy(A_lap; eliminate = eliminate)
+        if DH !== nothing
+            return (
+                b -> first(cmg_solve(DH, b; cycle = c, theta = theta, inner_tol = inner_tol)),
+                DH,
+            )
+        end
+    end
     if eliminate
         local EH = build_eliminated_hierarchy(A_lap)
         return (make_eliminated_preconditioner(EH, c, theta, inner_tol), EH)
@@ -173,7 +185,7 @@ function cmg_preconditioner_lap(
 end
 
 function cmg_preconditioner_adj(A::SparseMatrixCSC; kwargs...)
-    cmg_preconditioner_lap(lap(A); kwargs...)
+    cmg_preconditioner_lap(_lap(A); kwargs...)
 end
 
 function build_hierarchy(A::T, A_::T)::Vector{HierarchyLevel} where {T<:SparseMatrixCSC}
