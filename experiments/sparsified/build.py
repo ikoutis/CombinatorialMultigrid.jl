@@ -122,8 +122,8 @@ def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
         # many edges even as nodes merge, so the coarse operator is no cheaper.
         # A level is productive iff contraction actually reduces the edge count.
         A_c = contract_coo(A, cI, nc)
-        m = nnz_lower(A) - n                       # lower-tri off-diagonals = edges
-        m_c = nnz_lower(A_c) - nc
+        m = level.nnz_lo - n                       # lower-tri off-diagonals = edges
+        m_c = nnz_lower(A_c) - nc                   # (reuse level.nnz_lo; don't recompute)
         if m == 0 or m_c <= stall_ratio * m:       # edges dropped enough
             level.R = _restriction(cI, nc, n)
             levels.append(level)
