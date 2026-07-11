@@ -103,64 +103,22 @@ edge-ratio trigger as a net regression; the current behavior:
 
 ## Benchmark results (Wulver, 10⁶ chimeras, reps=3)
 
-Config for this run: node-ratio trigger, `keep_frac=0.5, bundles=1`, **Baswana–Sen**
-spanner (the MST-bundle default landed after; its run is pending), `eliminate=true`.
-Solvers: `ac`, `cmg-k-elim` (no sparsify), `cmg-sparsify-l` (`:legacy`),
-`cmg-sparsify-ks` (`:kscycle`). Draws split into **stalled** (`inj>0`) and
-**clean** (`inj=0`); `×ac = ac / solver` (>1 = faster than ac). Median total
-seconds (median iterations).
+Full writeup — the vs-`ac` tables (stalled/clean), MST-vs-Baswana build cost,
+iteration analysis, and the `:legacy`-vs-`:kscycle` comparison — is in
+**[`README-sparsify.md`](README-sparsify.md)**. Headline:
 
-**Stalled draws** — sparsify acts (the minority):
-
-| family (n) | ac | cmg-k-elim | cmg-sparsify-l | cmg-sparsify-ks |
-|---|---|---|---|---|
-| uni_bndry (6)    | 21.15 (16) — 1.00× | 25.58 (33) — 0.83× | 20.25 (33) — **1.04×** | 21.89 (28) — 0.97× |
-| uni_chimera (21) | 5.03 (21) — 1.00×  | 5.40 (23) — 0.93×  | 5.00 (31) — **1.01×**  | 5.54 (26) — 0.91×  |
-| wted_chimera (18)| 3.23 (21) — 1.00×  | 3.76 (22) — 0.86×  | 3.70 (21) — 0.87×      | 3.47 (22) — 0.93×  |
-
-**Clean draws** — sparsify inert, the ~70–90% majority:
-
-| family (n) | ac | cmg-k-elim | cmg-sparsify-l | cmg-sparsify-ks |
-|---|---|---|---|---|
-| uni_bndry (63)   | 5.77 (23) — 1.00× | 4.34 (26) — 1.33× | 4.80 (26) — 1.20× | 4.39 (26) — 1.31× |
-| uni_chimera (48) | 7.43 (25) — 1.00× | 4.04 (30) — 1.84× | 4.47 (29) — 1.66× | 3.95 (30) — 1.88× |
-| wted_chimera (51)| 7.05 (22) — 1.00× | 4.48 (21) — 1.57× | 4.38 (23) — 1.61× | 4.67 (21) — 1.51× |
-
-**Worst stalled draws** (the ~2×-slower-than-ac cases sparsify targets):
-
-| draw | ac | cmg-k-elim | cmg-sparsify-l |
-|---|---|---|---|
-| wted_chimera(1e6,5) | 1.64 (15) | 3.80 (22) — 0.43× | **1.88 (21) — 0.87×** |
-| uni_chimera(1e6,10) | 4.19 (31) | 8.32 (47) — 0.50× | 6.46 (61) — 0.65× |
-| uni_bndry(1e6,7)    | 15.79 (19)| 22.23 (36) — 0.71×| 18.18 (32) — 0.87× |
-
-**Takeaways.**
-- **Clean (majority): CMG beats `ac` by 1.3–1.9×**; sparsify is inert and stays
-  matched to `cmg-k-elim` — the 12–14× regression is fixed.
-- **Stalled (minority): `cmg-k-elim` is the only place CMG loses to `ac`** (0.83–
-  0.93×, up to 2× on the worst draws); `cmg-sparsify-l` lifts it to **~`ac`
-  parity** and roughly halves the worst-case gap (wted_chimera(1e6,5): 0.43×→0.87×).
+- **Clean draws (~70–90% majority):** every CMG variant beats `ac` **1.3–1.9×**;
+  sparsify is inert and matches `cmg-k-elim` — the 12–14× edge-trigger regression
+  is fixed.
+- **Stalled draws (minority):** `cmg-k-elim` is the *only* place CMG loses to `ac`
+  (up to ~2× on the worst draws); `cmg-sparsify-l` lifts it to **~`ac` parity**.
+- **MST vs Baswana–Sen:** MST **halves** the spanner build overhead on the large
+  stalled core (`uni_bndry`, +3.8s → +1.9s) and gives comparable-or-fewer
+  iterations; neutral where the core is small.
+- **`-l` vs `-ks`:** within ~10% wall-clock; `-ks` takes the fewest iterations
+  (and dips below `cmg-k-elim` on stalled cores), `-l` the fewest matvecs.
 - **Net: with sparsify-on-stall, CMG matches or beats `ac` across the whole
-  distribution.**
-
-### `:legacy` (`-l`) vs `:kscycle` (`-ks`)
-
-Wall-clock is within ~10% (a tie count-weighted); they differ in character:
-
-- **`ks` takes fewer iterations** everywhere (k-cycle FCG acceleration at the
-  coarse levels): e.g. uni_chimera stalled 26 vs 31, worst uni_chimera(1e6,10)
-  47 vs 61.
-- **`l` is faster per iteration on the stalled draws.** The injected sparsifier
-  is spectrally easy (κ≈4–6), so `ks`'s inner FCG isn't repaid; the cheap
-  stationary L-cycle (repeat 1) wins wall-clock — the port-notes recommendation
-  (`:legacy` = fewest matvecs for a sparsified hierarchy).
-- **`ks` wins the clean draws:** with `inj=0` it reduces to the k-cycle
-  (≈ `cmg-k-elim`), which beats `:legacy` on chimeras; `l` pays a ~10–20% legacy
-  tax there.
-
-So `-l` edges the stalled draws sparsify targets, while `-ks` never regresses vs
-the `cmg-k-elim` baseline on the clean majority. The strict best would be an
-**adaptive driver** (`:legacy` when `inj>0`, else `:kcycle`) — not yet built.
+  10⁶-chimera distribution.**
 
 ## Status
 Gate + executable reference **done and validated in Python**; the algorithm is
