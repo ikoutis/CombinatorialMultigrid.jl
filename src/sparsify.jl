@@ -20,9 +20,10 @@ validated in the CMG-python package.
                  For the L-cycle this sets the injected level's repeat multiplier
                  = floor(1/keep_frac - 1): 0.5 -> repeat 1 (cheapest), 1/3 ->
                  repeat 2. Lower keep_frac sparsifies harder but raises the repeat.
-- `bundles`    : number of peeled spanners kept at full weight (default 1; each
-                 extra bundle is another spanner build, so it ~doubles the
-                 per-injection build cost).
+- `bundles`    : number of peeled spanners/forests kept at full weight (default
+                 3, i.e. a 3-forest Nagamochi–Ibaraki bundle for `:mst`). More
+                 bundles -> lower effective stretch / higher cut connectivity;
+                 each is an extra forest build (cheap for `:mst`: O(m) each).
 - `t`          : greedy-spanner stretch; `nothing` -> `max(2, log2 n)` per level.
 - `stall_ratio`: per-level NODE-coarsening threshold; a level is productive iff
                  aggregation drops the node count below `stall_ratio * n`
@@ -33,7 +34,12 @@ validated in the CMG-python package.
 - `max_inject` : cap on injected sparsifier levels (guarantees termination).
 - `nnz_budget` : cumulative operator-complexity budget, a multiple of input nnz
                  (the same 5x guard stock CMG uses). `Inf` disables it.
-- `spanner`    : `:baswana_sen` (default, scalable) or `:greedy`.
+- `spanner`    : `:mst` (default; a `bundles`-forest maximum-spanning-forest
+                 bundle — a Nagamochi–Ibaraki cut certificate, O(m) to build, and
+                 on the high-conductance stall levels where sparsify fires cut ≈
+                 spectral so it is a good spectral preconditioner there at a
+                 fraction of Baswana–Sen's cost — see `max_spanning_forest`),
+                 `:baswana_sen` (the randomized (2k-1)-spanner), or `:greedy`.
 - `k`          : Baswana–Sen stretch parameter; `nothing` -> `ceil(log2 n)`.
 - `bundles_growth` : grow the bundle count by one per successive injection.
 - `base`       : direct-solve threshold (matches `build_hierarchy`'s 500).
@@ -42,14 +48,14 @@ validated in the CMG-python package.
 """
 Base.@kwdef struct SparsifyOptions
     keep_frac::Float64 = 0.5
-    bundles::Int = 1
+    bundles::Int = 3
     t::Union{Nothing,Float64} = nothing
     stall_ratio::Float64 = 0.9   # NODE-coarsening threshold: a level is
                                  # productive iff aggregation drops nc below
                                  # stall_ratio*n; nc > stall_ratio*n is a stall.
     max_inject::Int = 10
     nnz_budget::Float64 = 5.0
-    spanner::Symbol = :baswana_sen
+    spanner::Symbol = :mst
     k::Union{Nothing,Int} = nothing
     bundles_growth::Bool = false
     base::Int = 500
@@ -71,7 +77,8 @@ function spanner_bundle(n::Integer, edges::AbstractVector, t::Real, bundles::Int
                         rng::AbstractRNG = Random.default_rng())
     _one(rem) = spanner === :greedy      ? greedy_spanner(n, rem, t) :
                 spanner === :baswana_sen ? spanner_baswana_sen(n, rem; k = k, rng = rng) :
-                error("unknown spanner $(repr(spanner)); use :greedy or :baswana_sen")
+                spanner === :mst         ? max_spanning_forest(n, rem) :
+                error("unknown spanner $(repr(spanner)); use :greedy, :baswana_sen, or :mst")
     ekey(e) = (min(e[1], e[2]), max(e[1], e[2]))
     kept = SpanEdge[]
     rem = collect(SpanEdge, edges)

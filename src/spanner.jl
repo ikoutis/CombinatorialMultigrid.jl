@@ -47,6 +47,55 @@ function greedy_spanner(n::Integer, edges::AbstractVector, t::Real)
     return span
 end
 
+# ---------------------------------------------------------------------------
+# maximum-weight spanning forest (Kruskal + union-find), in conductance
+# ---------------------------------------------------------------------------
+"""
+    max_spanning_forest(n, edges) -> Vector{Tuple{Int,Int,Float64}}
+
+Maximum-weight spanning forest by conductance: scan edges in descending weight,
+keep the heaviest that joins two components (Kruskal + union-find). `edges` is a
+vector of `(u, v, w)` conductances; returns the kept edges (a subset).
+O(m log m) sort + O(m α(n)) unions.
+
+A bundle of `k` peeled maximum spanning forests is a **Nagamochi–Ibaraki
+`k`-connectivity certificate** — it preserves cuts, i.e. it is a CUT sparsifier.
+On the high-conductance (expander-like) levels where CMG stalls — the only
+levels where sparsify is invoked — cut ≈ spectral, so this cheap forest bundle
+is a good spectral preconditioner there, at a fraction of the Baswana–Sen build
+cost, with a fixed density-independent bundle size of `k·(n-1)` edges. It also
+keeps every connectivity bridge (forced by the spanning-forest property),
+preserving the small eigenvalues from weak cuts.
+"""
+function max_spanning_forest(n::Integer, edges::AbstractVector)
+    parent = collect(Int64, 1:n)
+    rank = zeros(Int8, n)
+    function find(x::Int64)
+        root = x
+        @inbounds while parent[root] != root
+            root = parent[root]
+        end
+        @inbounds while parent[x] != root                # path compression
+            parent[x], x = root, parent[x]
+        end
+        return root
+    end
+    kept = SpanEdge[]
+    order = sortperm(edges; by = e -> -float(e[3]))       # descending conductance
+    @inbounds for i in order
+        u, v, w = edges[i]
+        ru, rv = find(Int64(u)), find(Int64(v))
+        ru == rv && continue
+        if rank[ru] < rank[rv]
+            ru, rv = rv, ru
+        end
+        parent[rv] = ru
+        rank[ru] == rank[rv] && (rank[ru] += 1)
+        push!(kept, (Int64(u), Int64(v), float(w)))
+    end
+    return kept
+end
+
 # bounded-radius Dijkstra on the current spanner: is there an s->tgt path of
 # length <= cap? (decrease-key priority queue; no stale entries to skip.)
 function _within(adj::Vector{Vector{Tuple{Int64,Float64}}}, s::Int64, tgt::Int64,
