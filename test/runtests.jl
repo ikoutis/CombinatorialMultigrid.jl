@@ -559,6 +559,47 @@ const CMG = CombinatorialMultigrid
         @test relres(A, xs, b1) < 1e-6
     end
 
+    @testset "disconnected components" begin
+        # A disconnected Laplacian: two connected blocks + an isolated vertex.
+        # The whole matrix is singular (one null-space dim per component); the
+        # per-component solve grounds each block, so the residual is ~0 for a
+        # range-consistent b. This input makes the plain (split=false) build
+        # error/stall, which is exactly what split_components fixes.
+        Random.seed!(101)
+        local L1 = grid2_lap(20, 20)                      # connected, 400 nodes
+        local L2 = lap(tree_plus_offtree_adj(300, 10))    # connected, 300 nodes
+        local A = blockdiag(L1, L2, spzeros(1, 1))        # + 1 isolated vertex
+        local n = size(A, 1)
+        @test maximum(CMG.components(A)) == 3
+        local xref = randn(n)
+        local b = A * xref                                # in range() by construction
+        for elim in (true, false)
+            local x, st = cmg_solve(A, b; split_components = true, eliminate = elim,
+                cycle = :kcycle, maxit = 200, tol = 1e-8)
+            @test relres(A, x, b) < 1e-6
+            @test st.converged
+        end
+        # the factory returns a DisconnectedHierarchy for a disconnected input
+        local (_, DH) = cmg_preconditioner_lap(A; cycle = :kcycle, split_components = true)
+        @test DH isa DisconnectedHierarchy
+
+        # A disconnected but nonsingular SDD system (two SDD blocks): the
+        # per-component solve must match the direct dense solve.
+        local S = blockdiag(grid2_sdd(15, 15), grid2_sdd(10, 12))
+        local bs = randn(size(S, 1))
+        local xs, _ = cmg_solve(S, bs; split_components = true, eliminate = true,
+            maxit = 200, tol = 1e-8)
+        @test norm(xs - Array(S) \ bs) / norm(Array(S) \ bs) < 1e-5
+
+        # On a connected graph, split_components is a no-op: identical code path,
+        # identical result whether the knob is on or off.
+        local Ac = grid2_sdd(24, 24)
+        local bc = randn(size(Ac, 1))
+        local x_on, _ = cmg_solve(Ac, bc; split_components = true, maxit = 200, tol = 1e-8)
+        local x_off, _ = cmg_solve(Ac, bc; split_components = false, maxit = 200, tol = 1e-8)
+        @test x_on == x_off
+    end
+
 end
 
 # optional timing script on the large example matrix (requires MAT.jl and

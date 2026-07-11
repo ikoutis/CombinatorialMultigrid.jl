@@ -324,8 +324,17 @@ function cmg_solve(
     A::SparseMatrixCSC,
     b::AbstractVector{<:Real};
     eliminate::Bool = true,
+    split_components::Bool = true,
     kwargs...,
 )
+    if split_components
+        # Disconnected input: solve each connected component independently (each
+        # is connected, so all existing build/grounding logic applies). On a
+        # connected graph this returns nothing and we fall through unchanged.
+        # Pass `split_components = false` to skip the check.
+        local DH = build_disconnected_hierarchy(A; eliminate = eliminate)
+        DH !== nothing && return cmg_solve(DH, b; kwargs...)
+    end
     if eliminate
         # Default path: exactly factor out degree-1/2 nodes, then solve the
         # reduced core. On near-tree inputs this is a large win; on inputs with
