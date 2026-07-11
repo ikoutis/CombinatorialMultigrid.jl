@@ -16,8 +16,9 @@ on-stall build branch and the spanner/sparsify module are new.
 |---|---|
 | `sparsify.py` | greedy spanner (resistance metric) + `spanner_bundle` + adaptive `sparsify` + scipy⇄edge-list SDD bridge. **No pycmg imports** — ports 1:1 to Julia. |
 | `graphs.py` | SPD test-graph generators (`dense_blob`, `blob_chain`, `dense_blob_pair_bridge`), retuned dense enough to stall the *real* aggregation. |
-| `build.py` | `build_sparsified_hierarchy` — mirrors `pycmg._hierarchy.build_hierarchy`, forking only the stall guard to inject a same-size sparsifier level. The only file importing pycmg internals. |
+| `build.py` | `build_sparsified_hierarchy` — mirrors `pycmg._hierarchy.build_hierarchy`, forking only the stall guard (on the EDGE ratio) to inject a same-size sparsifier level. Imports pycmg internals. |
 | `validate.py` | the three guideline checks, run against the real aggregation/solver. |
+| `kscycle.py` | the adaptive **Ks-cycle** and an honest cycle comparison (`python3 kscycle.py`) — see the Cycles section. Imports the unchanged pycmg cycle primitives. |
 | `run.py` | thin entry point (`python3 run.py` → `validate.py`). |
 
 ## How to run
@@ -101,13 +102,45 @@ level's residual/smoother use `A`; the nonlinear FCG recursion propagates that
 mismatch. (It is *not* excessive inner iterations — the injected level's `krepeat` is
 already 1; forcing it to 1 changes nothing.)
 
-**Port-back recommendation.** Drive a sparsified hierarchy with the **L-cycle**
-(`cycle = :legacy` in Julia) — it is the natural fit, the sparsify correction being
-stationary. If the K-cycle is wanted, special-case a same-size level in `_inner_fcg`:
-either skip the inner FCG and add one sub-hierarchy apply (a stationary step), or use
-the level's own operator `A` (not `levels[level+1].A`) for the step-length
-minimization. The guidelines' "solve side needs no changes" holds for *correctness* and
-for the L-cycle; this is a K-cycle *efficiency* caveat.
+**The Ks-cycle: an adaptive K-cycle for the sparsify level (`kscycle.py`).** We
+implemented the two fixes above and measured them (`python3 kscycle.py`), which turned
+up the real conclusion. `kscycle.py` special-cases a same-size level in two modes:
+*stationary* (skip the inner FCG, one sub-hierarchy apply) and *operator* (inner FCG,
+but minimize over the level's own `A` and run `samesize_nu` inner iterations, using the
+sub-hierarchy as an accelerated inner solver). Nothing in `src/pycmg` changes — the
+outer FCG driver is ported into the experiment (verified to reproduce pycmg's
+`legacy-cmg` to the iteration when forced all-stationary).
+
+**Iteration count is a trap here; the honest metric is finest-level matvecs / wall
+time.** Measured on chains of dense blobs (tol 1e-9):
+
+| cycle | outer its | size-n matvecs | wall-clock |
+|---|---|---|---|
+| **L-cycle** | 15–17 | **105–119** | **11–17 ms** |
+| K-cycle (stock) | 26–171 | 234–1539 | 19–173 ms |
+| Ks-cycle *operator* (nu=8) | **6–8** | 192–348 | 29–45 ms |
+| Ks-cycle *stationary* | 17 / 85 | 119 / 595 | 11 / 108 ms |
+
+- The **stock K-cycle degrades badly** (up to 171 iters / 1539 matvecs) — the operator
+  inconsistency, worse the more sparsify levels stack.
+- The **Ks-cycle *operator* mode cuts outer iterations below the L-cycle** (6–8 vs
+  15–17) — the operator-consistent fix works — **but does 2–3× more total work**,
+  because with two stacked same-size levels its `samesize_nu` inner iterations nest and
+  it applies the finest operators far more often. Fewer iterations, more matvecs, slower.
+- The **Ks-cycle *stationary* mode** equals the L-cycle when stable but destabilizes
+  when a linear top mixes with nonlinear coarse levels (85 iters in one config).
+
+**Conclusion / port-back recommendation.** Drive sparsified hierarchies with the
+**L-cycle** (`cycle = :legacy` in Julia) — it is the fewest matvecs and the fastest.
+The Ks-cycle was worth building because it *explains why*: the injected sparsifiers are
+already spectrally accurate (κ(A_sp⁻¹A) ≈ 4–6), so there is **nothing for the K-cycle's
+inner FCG to accelerate** — a single stationary apply per level is optimal, and every
+inner iteration is wasted work. The K-cycle's value (inner acceleration of a *poor*
+coarse operator) is exactly what a good sparsifier removes the need for. So on the
+Julia side: keep the sparsify path on the legacy cycle; do not special-case the K-cycle
+(it cannot beat the L-cycle here). The guidelines' "solve side needs no changes" holds
+for correctness and for the L-cycle; the K-cycle is simply the wrong tool for this
+hierarchy.
 - **Production CMG breaks down on the stall.** On the ill-conditioned chain, the
   standard `precondition(A).solve` FCG breaks down (`conv=False`, true_res 8.7e-5) — the
   "loses accuracy to the ill-conditioning" the reference describes — whereas the
