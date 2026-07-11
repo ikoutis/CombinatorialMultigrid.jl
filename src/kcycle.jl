@@ -262,13 +262,14 @@ end
 # degrades on a same-size sparsify level because inner_fcg! minimizes the step
 # over H[lvl+1].A (the sparsifier), while the identity transfer makes the
 # consistent operator the level's OWN A. kscycle! special-cases such a level
-# (nc == n and not last): its inner FCG minimizes over H[lvl].A and runs
-# _KSCYCLE_NU iterations, using the sub-hierarchy as an accelerated inner
-# solver. On a hierarchy with no same-size levels it reduces exactly to
-# kcycle!. The recommended driver for a sparsified hierarchy is still the
-# L-cycle (:legacy); :kscycle is the robustness fallback.
+# (nc == n and not last): its inner FCG minimizes over H[lvl].A, but runs the
+# SAME `krepeat[lvl]` inner iterations as every other level (the standard
+# k-cycle work-budget rule) -- the only difference from a normal level is the
+# minimization operator, not the iteration count. On a hierarchy with no
+# same-size levels it reduces exactly to kcycle!. The recommended driver for a
+# sparsified hierarchy is still the L-cycle (:legacy); :kscycle is the
+# robustness fallback.
 # ---------------------------------------------------------------------------
-const _KSCYCLE_NU = 8   # inner FCG iterations at an injected same-size level
 
 @inline _is_samesize(h::HierarchyLevel) = !h.islast && h.nc == h.n
 
@@ -313,11 +314,13 @@ function kscycle!(
     interpolate!(W[lvl+1].b, cI, tmp)
 
     # A same-size (injected) level minimizes the inner FCG over this level's own
-    # A (the correct residual equation under the identity transfer) with
-    # _KSCYCLE_NU iterations; every other level is the standard K-cycle over the
-    # Galerkin next operator (so on a normal hierarchy kscycle! == kcycle!).
+    # A (the correct residual equation under the identity transfer); a normal
+    # level minimizes over the Galerkin next operator. Both run the SAME
+    # `krepeat[lvl]` inner iterations (the standard k-cycle work-budget rule), so
+    # on a normal hierarchy kscycle! == kcycle!, and an injected level costs the
+    # same per-level budget as any other rather than a fixed multiple.
     if _is_samesize(h)
-        inner_fcg_ks!(W[lvl+1].z, H, W, lvl, lvl, _KSCYCLE_NU,
+        inner_fcg_ks!(W[lvl+1].z, H, W, lvl, lvl, krepeat[lvl],
             W[lvl+1].b, krepeat, inner_tol, visits)
     else
         inner_fcg_ks!(W[lvl+1].z, H, W, lvl, lvl + 1, krepeat[lvl],

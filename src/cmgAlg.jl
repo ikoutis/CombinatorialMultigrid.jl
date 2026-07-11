@@ -280,26 +280,56 @@ function build_hierarchy(A::T, A_::T; sparsify_on_stall::Bool = false,
             end
         else
             # ===== sparsify-on-stall path =====
-            # port: CMG-python build_sparsified_hierarchy (_hierarchy.py).
-            # Criterion B: cumulative operator-complexity budget (the same 5x
-            # guard, now nnz_budget). Backstops sparsification too timid to
-            # control density; nnz_budget = Inf disables it.
-            if h_nnz > sparsify_opts.nnz_budget * original_nnz
-                @warn "CMG convergence may be slow due to matrix density. Future versions of CMG will eliminate this problem."
-                hl.sd, hl.islast, hl.iterative = true, true, true
-                push!(H, hl)
-                break
-            end
-            # Criterion A: per-level EDGE stall (not node count). Densification
-            # is what CMG cannot escape -- contraction fill keeps ~as many edges
-            # even as nodes merge; a level is productive iff contraction reduces
-            # the edge count below stall_ratio * m.
-            local A_c = contract_coo(A, cI, nc)
-            local m = nnz_lower(A_) - n            # lower-tri off-diagonals = edges
-            local m_c = nnz_lower(A_c) - nc
-            if m == 0 || m_c <= sparsify_opts.stall_ratio * m
-                # productive: coarsen as usual (reuse the contraction just built)
-                A_ = A_c
+            # Mirror the stock build EXACTLY (node-count coarsening) until the
+            # genuine stagnation point -- the SAME condition that makes stock CMG
+            # warn and give up (`nc >= n-1`, i.e. a level that will not coarsen,
+            # or the cumulative operator-complexity budget `nnz_budget`). Only
+            # THEN sparsify: inject a spanner+sparsifier same-size level (identity
+            # transfer cI = 1:n, nc = n; flows through the cycles unchanged) and
+            # continue on the sparser operator -- "sparsify at that level and
+            # lower". A graph that coarsens all the way to `base` never reaches
+            # the stagnation branch, so it pays ZERO sparsify overhead and is
+            # byte-identical to the stock (cmg-k-elim) hierarchy. (The old
+            # edge-ratio trigger `stall_ratio` fired on normal chimera levels,
+            # building/discarding spanners and truncating the hierarchy -- that
+            # regression is what this replaces; `stall_ratio` is now unused.)
+            if (nc >= n - 1) || (h_nnz > sparsify_opts.nnz_budget * original_nnz)
+                if injected < sparsify_opts.max_inject
+                    local e0 = edges_of(A_)
+                    local Bn = sparsify_opts.bundles_growth ?
+                               sparsify_opts.bundles + injected : sparsify_opts.bundles
+                    local sp_e, _p = sparsify(n, e0; t = sparsify_opts.t, bundles = Bn,
+                        keep_frac = sparsify_opts.keep_frac, spanner = sparsify_opts.spanner,
+                        k = sparsify_opts.k, rng = rng)
+                    if length(sp_e) < 0.98 * length(e0)   # sparsifier actually reduced
+                        push!(H, HierarchyLevel(
+                            sd = sd, islast = false, iterative = true,
+                            A = A_, invD = invD, cI = collect(Int64, 1:n), nc = n,
+                            n = n, nnz = nnz(A_), chol = ldl([1.0 0; 0 1.0]),
+                        ))
+                        A_ = sdd_from_edges(n, sp_e, slack_of(A_))
+                        injected += 1
+                        if sflag
+                            sd = true
+                            sflag = false
+                        end
+                    else
+                        # couldn't reduce -> terminal iterative base (stalled CMG)
+                        @warn "CMG convergence may be slow due to matrix density. Future versions of CMG will eliminate this problem."
+                        hl.sd, hl.islast, hl.iterative = true, true, true
+                        push!(H, hl)
+                        break
+                    end
+                else
+                    # max_inject reached -> terminal iterative base
+                    @warn "CMG convergence may be slow due to matrix density. Future versions of CMG will eliminate this problem."
+                    hl.sd, hl.islast, hl.iterative = true, true, true
+                    push!(H, hl)
+                    break
+                end
+            else
+                # productive by the stock node criterion: coarsen as usual
+                A_ = contract_coo(A, cI, nc)
                 push!(H, hl)
                 if sflag
                     sd = true
@@ -308,39 +338,6 @@ function build_hierarchy(A::T, A_::T; sparsify_on_stall::Bool = false,
                 if nc == 1
                     break
                 end
-            elseif injected < sparsify_opts.max_inject
-                # STALL: inject a same-size spanner+sparsifier level (identity
-                # transfer cI = 1:n, nc = n; flows through the cycles unchanged)
-                # and continue on the sparser operator.
-                local e0 = edges_of(A_)
-                local Bn = sparsify_opts.bundles_growth ?
-                           sparsify_opts.bundles + injected : sparsify_opts.bundles
-                local sp_e, _p = sparsify(n, e0; t = sparsify_opts.t, bundles = Bn,
-                    keep_frac = sparsify_opts.keep_frac, spanner = sparsify_opts.spanner,
-                    k = sparsify_opts.k, rng = rng)
-                if length(sp_e) < 0.98 * length(e0)   # sparsifier actually reduced
-                    push!(H, HierarchyLevel(
-                        sd = sd, islast = false, iterative = true,
-                        A = A_, invD = invD, cI = collect(Int64, 1:n), nc = n,
-                        n = n, nnz = nnz(A_), chol = ldl([1.0 0; 0 1.0]),
-                    ))
-                    A_ = sdd_from_edges(n, sp_e, slack_of(A_))
-                    injected += 1
-                    if sflag
-                        sd = true
-                        sflag = false
-                    end
-                else
-                    # couldn't reduce -> terminal iterative base (the stalled CMG)
-                    hl.sd, hl.islast, hl.iterative = true, true, true
-                    push!(H, hl)
-                    break
-                end
-            else
-                # max_inject reached -> terminal iterative base
-                hl.sd, hl.islast, hl.iterative = true, true, true
-                push!(H, hl)
-                break
             end
         end
     end

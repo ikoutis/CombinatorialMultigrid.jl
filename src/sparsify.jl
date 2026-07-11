@@ -16,11 +16,13 @@ Tuning knobs for sparsify-on-stall (see `cmg_solve(A, b; sparsify_on_stall=true,
 sparsify_opts=SparsifyOptions(...))`). Defaults are the production values
 validated in the CMG-python package.
 
-- `keep_frac`  : target keep-fraction for off-bundle edges (0.5 -> C_op ~ 2).
-- `bundles`    : number of peeled spanners kept at full weight.
+- `keep_frac`  : target keep-fraction for off-bundle edges (0.25 -> C_op ~ 1.25).
+- `bundles`    : number of peeled spanners kept at full weight (default 2).
 - `t`          : greedy-spanner stretch; `nothing` -> `max(2, log2 n)` per level.
-- `stall_ratio`: per-level edge-stall threshold; a level is productive iff
-                 contraction cuts its edge count below `stall_ratio * m`.
+- `stall_ratio`: DEPRECATED / unused. Sparsification now triggers at the stock
+                 node/nnz stagnation point (the same `nc >= n-1` /
+                 `nnz_budget * original_nnz` guard stock CMG warns on), not on a
+                 per-level edge ratio. Kept only for struct compatibility.
 - `max_inject` : cap on injected sparsifier levels (guarantees termination).
 - `nnz_budget` : cumulative operator-complexity budget, a multiple of input nnz
                  (the same 5x guard stock CMG uses). `Inf` disables it.
@@ -32,10 +34,13 @@ validated in the CMG-python package.
                  the preconditioner reproducible).
 """
 Base.@kwdef struct SparsifyOptions
-    keep_frac::Float64 = 0.5
-    bundles::Int = 1
+    keep_frac::Float64 = 0.25
+    bundles::Int = 2
     t::Union{Nothing,Float64} = nothing
-    stall_ratio::Float64 = 0.9
+    stall_ratio::Float64 = 0.9   # DEPRECATED: unused since the stall trigger
+                                 # switched to the stock node/nnz stagnation
+                                 # criterion (build_hierarchy). Kept for struct
+                                 # compatibility; has no effect.
     max_inject::Int = 10
     nnz_budget::Float64 = 5.0
     spanner::Symbol = :baswana_sen

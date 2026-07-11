@@ -152,7 +152,10 @@ function _gkappa(A, M)
     return maximum(ev) / minimum(ev)
 end
 
-# edge-reduction ratio m_c/m of one aggregate+contract step (the stall criterion)
+# edge-reduction ratio m_c/m of one aggregate+contract step. (A densification
+# DIAGNOSTIC: ~1 means contraction barely thins the edges. NB: this is no longer
+# the build's stall trigger -- sparsification now fires at the stock node/nnz
+# stagnation point, see build_hierarchy.)
 function _edge_ratio(A)
     local n = size(A, 1)
     local cI, nc = CMG.steiner_group(A, Array(diag(A)))
@@ -687,13 +690,14 @@ _n_inject(H) = count(h -> !h.islast && h.nc == h.n, H)
     @testset "sparsify-on-stall" begin
         Random.seed!(202)
 
-        # 1. stall -> resume + spectral quality: a dense blob stalls on EDGES
-        # (contraction barely thins them); one adaptive sparsify lets aggregation
-        # resume with a spectrally-close sparsifier.
+        # 1. sparsifier quality: a dense blob densifies (contraction barely thins
+        # its edges); one adaptive sparsify at keep_frac=0.5 halves the edges with
+        # a spectrally-close sparsifier. (Tests the sparsify FUNCTION at a pinned
+        # keep_frac, independent of the SparsifyOptions default.)
         local A1 = _spd(dense_blob_adj(400; avgdeg = 32, seed = 1))
-        @test _edge_ratio(A1) >= 0.9                       # densification stall
+        @test _edge_ratio(A1) >= 0.9                       # densifies (diagnostic)
         local e0 = CMG.edges_of(A1)
-        local sp_e, _p = CMG.sparsify(400, e0; keep_frac = 0.5, rng = MersenneTwister(0))
+        local sp_e, _p = CMG.sparsify(400, e0; keep_frac = 0.5, bundles = 1, rng = MersenneTwister(0))
         local A1sp = CMG.sdd_from_edges(400, sp_e, CMG.slack_of(A1))
         @test _edge_ratio(A1sp) < 0.9                      # aggregation resumes
         @test length(e0) / length(sp_e) >= 1.8             # >= 1.8x fewer edges
@@ -705,7 +709,8 @@ _n_inject(H) = count(h -> !h.islast && h.nc == h.n, H)
             wbridge = 1e-3); slack = 1e-10)
         local e2 = CMG.edges_of(A2)
         local span_k = sum(_gkappa(A2, CMG.sdd_from_edges(400,
-            CMG.sparsify(400, e2; rng = MersenneTwister(i))[1], CMG.slack_of(A2)))
+            CMG.sparsify(400, e2; keep_frac = 0.5, bundles = 1, rng = MersenneTwister(i))[1],
+            CMG.slack_of(A2)))
             for i = 1:4) / 4
         local unif_k = begin
             local rng = MersenneTwister(7); local acc = 0.0
@@ -729,8 +734,10 @@ _n_inject(H) = count(h -> !h.islast && h.nc == h.n, H)
                   for (a, b) in zip(Hstock, Hoff))
         @test _n_inject(Hoff) == 0
 
-        # 4. end-to-end, all three cycles, genuine Laplacian (b _|_ 1). The fork
-        # injects >= 1 same-size level and every driver converges.
+        # 4. end-to-end, all three cycles, genuine Laplacian (b _|_ 1). A dense
+        # blob-chain densifies under contraction, so the build reaches the stock
+        # stagnation point (nnz budget / nc>=n-1), injects >= 1 same-size level
+        # there, and every driver converges.
         local L4 = lap(blob_chain_adj(6, 150; seed = 7))
         local Hon = CMG.build_hierarchy(L4, CMG.validateInput!(L4); sparsify_on_stall = true)
         @test _n_inject(Hon) >= 1
