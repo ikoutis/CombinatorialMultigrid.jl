@@ -40,10 +40,16 @@ reusing the production solve verbatim. Production `src/` is untouched.
   Run: `python3 reference.py`.
 - `PYTHON-GUIDELINES.md` — spec/guidelines for implementing this in a Python CMG
   (cmg-python), written against `reference.py`.
-- (pending) Julia `spanner.jl` / `sparsify.jl` / `build_sparsified_hierarchy.jl`
-  / `sparsified_solve.jl` / `runtests.jl` / `bench.jl`. Baswana–Sen (`k=log n`)
-  is the production spanner; the Python uses a greedy spanner for unambiguous
-  correctness.
+- **Julia port (production — done, this branch).** The validated algorithm now
+  lives in the package `src/`, behind `cmg_solve(A, b; sparsify_on_stall=true)`
+  (off by default, stock behavior byte-identical): `src/spanner.jl` (greedy +
+  Baswana–Sen), `src/sparsify.jl` (`SparsifyOptions`, bundle, adaptive sparsify,
+  edge bridge), the `build_hierarchy` fork in `src/cmgAlg.jl`, and the
+  sparsify-aware `cycle=:kscycle` in `src/kcycle.jl`. Tests:
+  `test/runtests.jl`'s `@testset "sparsify-on-stall"`. Benchmarks (this dir):
+  `bench_sparsify.jl`, `bench_cycles.jl`, `bench_bundles.jl`, `bench_wulver.jl`
+  (+ shared `graphs.jl`). Mapping and expected numbers: `PORT-NOTES.md`.
+  Baswana–Sen (`k=⌈log₂ n⌉`) is the production spanner; greedy is the reference.
 
 ## Gate results (prototype.py)
 Spanner in the resistance metric (edge length = 1/conductance): a t-spanner
@@ -73,9 +79,12 @@ On a chain of 8 dense blobs joined by weak cuts (effective κ ≈ 2.6e7):
   in ~12 iters. The gap grows with κ/scale. Solution matches a direct solve.
 
 ## Status
-Gate + executable reference **done and validated in Python**. Next: implement in
-cmg-python per `PYTHON-GUIDELINES.md` (fast iteration; I can run Python here,
-not Julia), then port the validated algorithm to the Julia CMG and bench on
-Wulver vs `cmg-k-elim`/`ac` on `uni_chimera(1e6,10)`, `wted_chimera(1e6,5)`.
-No chimera generator is needed on the Python side — synthetic stalls suffice, or
-dump one real stalled operator from a Julia run.
+Gate + executable reference **done and validated in Python**; the algorithm is
+**shipped in CMG-python** (`pycmg` ≥ 0.5.0, opt-in `precondition(A,
+sparsify_on_stall=True)`) and now **ported to this Julia package** as a
+production opt-in (this branch — `src/` + `test/` + benches, off by default and
+byte-identical when off). Remaining: run `bench_wulver.jl` on Wulver vs
+`cmg-k-elim`/`ac` on `uni_chimera(1e6,10)`, `wted_chimera(1e6,5)` (needs a
+chimera generator, not shipped here), then open a PR. The synthetic benches
+(`bench_sparsify.jl` / `bench_cycles.jl` / `bench_bundles.jl`) need no chimera
+generator — dense blobs / chains reproduce the stall and run in any Julia env.
