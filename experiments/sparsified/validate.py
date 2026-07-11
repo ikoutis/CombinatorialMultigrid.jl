@@ -8,7 +8,8 @@ solver (not reference.py's stylized gate). Three checks from PYTHON-GUIDELINES:
      (nc/n < stall_ratio) and the sparsifier is spectrally close (bounded
      kappa(A_sp^-1 A)); a spanner-essential control shows uniform-only sampling
      is far worse on a weak-bridge graph.
-  2. end-to-end: a V-cycle-PCG (method="legacy-cmg") on an ill-conditioned
+  2. end-to-end: an L-cycle-PCG (method="legacy-cmg" -- the legacy stationary
+     cycle, NOT a geometric V-cycle) on an ill-conditioned
      chain-of-blobs converges in far fewer iters WITH sparsify-on-stall than the
      stalled/shallow build WITHOUT it; the solution matches a direct solve.
   3. correctness: the forked preconditioner drives the outer solver to the
@@ -23,6 +24,7 @@ import numpy as np
 import scipy.sparse.linalg as spla
 from scipy.linalg import eigh
 
+from pycmg._hierarchy import contract_coo, nnz_lower
 from pycmg._precond import Preconditioner, precondition
 from pycmg._steiner import steiner_group_arrays
 
@@ -34,6 +36,19 @@ from sparsify import edges_of, sdd_from_edges, slack_of, sparsify
 def _nc_ratio(A):
     _, nc = steiner_group_arrays(A.indptr, A.indices, A.data, A.shape[0])
     return nc / A.shape[0]
+
+
+def _edge_ratio(A):
+    """Edge-reduction ratio of one aggregate+contract step, m_c/m -- the build's
+    stall criterion. Near 1 means contraction did NOT thin the graph (a
+    densification stall CMG cannot escape); < stall_ratio means it did."""
+    n = A.shape[0]
+    cI, nc = steiner_group_arrays(A.indptr, A.indices, A.data, n)
+    if nc == 1:
+        return 0.0
+    A_c = contract_coo(A, cI, nc)
+    m = nnz_lower(A) - n
+    return (nnz_lower(A_c) - nc) / m if m else 0.0
 
 
 def _kappa(A, M):
@@ -53,24 +68,27 @@ def _true_relres(A, x, b):
 
 # ----------------------------------------------------------------------------
 def test_stall_resume(stall_ratio=0.9):
-    """A dense blob stalls the real aggregation; one adaptive sparsify resumes
-    it, with a spectrally-close sparsifier."""
+    """On a dense blob, contraction barely thins the EDGES (a densification
+    stall: edge_ratio ~ 1); one adaptive sparsify lets aggregation coarsen so
+    the next contraction thins edges (edge_ratio < stall_ratio) -- the resume,
+    keyed on edges not nodes -- with a spectrally-close sparsifier."""
     random.seed(0)
     np.random.seed(0)
-    A = spd_operator(400, dense_blob(400, avgdeg=32, seed=1))
-    r0 = _nc_ratio(A)
-    assert r0 >= stall_ratio, f"expected a stall, got nc/n={r0:.3f}"
+    A = spd_operator(400, dense_blob(400, avgdeg=24, seed=1))
+    er0, nr0 = _edge_ratio(A), _nc_ratio(A)
+    assert er0 >= stall_ratio, f"expected an edge stall, got edge_ratio={er0:.3f}"
     e0 = edges_of(A)
     sp_e, p = sparsify(400, e0, bundles=1, keep_frac=0.5)
     A_sp = sdd_from_edges(400, sp_e, slack_of(A))
-    r1 = _nc_ratio(A_sp)
+    er1, nr1 = _edge_ratio(A_sp), _nc_ratio(A_sp)
     red = len(e0) / len(sp_e)
     k = _kappa(A, A_sp)
-    assert r1 < stall_ratio, f"aggregation did not resume: nc/n={r1:.3f}"
+    assert er1 < stall_ratio, f"contraction still stalls on edges: {er1:.3f}"
     assert red >= 1.8, f"edge reduction too small: {red:.2f}x"
     assert k < 50.0, f"sparsifier not spectrally close: kappa={k:.1f}"
-    print(f"PASS: stall->resume  nc/n {r0:.3f}->{r1:.3f}  reduction {red:.2f}x  "
-          f"kappa(A_sp^-1 A)={k:.1f}  (p={p:.2f})")
+    print(f"PASS: stall->resume  edge_ratio {er0:.3f}->{er1:.3f}  "
+          f"(node_ratio {nr0:.3f}->{nr1:.3f})  reduction {red:.2f}x  "
+          f"kappa(A_sp^-1 A)={k:.1f}")
 
 
 def test_spanner_essential():
@@ -107,9 +125,9 @@ def _blob_chain_system(slack=1e-8, seed=7):
 
 
 def test_end_to_end():
-    """V-cycle-PCG converges in far fewer iters with sparsify-on-stall than the
-    stalled/shallow build without it; production CMG (which crawls through the
-    stall) is reported for context."""
+    """L-cycle-PCG (the legacy stationary cycle) converges in far fewer iters
+    with sparsify-on-stall than the stalled/shallow build without it; production
+    CMG (which crawls through the stall) is reported for context."""
     random.seed(1)
     np.random.seed(1)
     A, b = _blob_chain_system()
@@ -140,8 +158,8 @@ def test_end_to_end():
     print(f"      context: production CMG legacy-cmg -> {itp} iters conv={okp} "
           f"true_res={_true_relres(A, xp, b):.1e} (breaks down on the stall); "
           f"fork+kcycle -> {itk} iters (same-size level suits the stationary "
-          f"V-cycle; the K-cycle's inner FCG over a same-size operator adds "
-          f"cost -- a port-back note)")
+          f"L-cycle; the K-cycle's inner FCG minimizes over the sparsifier, not "
+          f"the level's operator -- a port-back note; see PYTHON-IMPL.md)")
 
 
 def _centered_err(x, xref):

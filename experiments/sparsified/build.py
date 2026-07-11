@@ -55,9 +55,14 @@ def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
     Parameters mirror the guideline knobs: `keep_frac` (target keep-fraction of
     the adaptive sparsifier), `bundles` (spanner bundles), `t` (spanner stretch,
     default log2(n) per level), `stall_ratio` (a level is "productive" iff
-    nc <= stall_ratio*n; above it is a stall), `max_inject` (hard cap on
-    injections -> termination), `base` (direct-solve threshold, 700 as in CMG).
-    Operators are treated as SPD (Laplacian + slack); is_sdd is False.
+    contraction reduces the EDGE count below stall_ratio*m; at/above it the
+    level densifies -> a stall), `max_inject` (hard cap on injections ->
+    termination), `base` (direct-solve threshold, 700 as in CMG). Operators are
+    treated as SPD (Laplacian + slack); is_sdd is False.
+
+    The stall is keyed on EDGES, not nodes: densification (contraction fill /
+    expander levels) is what CMG cannot escape -- nodes may merge while the edge
+    count, hence per-iteration cost and hierarchy depth, does not fall.
     """
     A = A.tocsr()
     levels = []
@@ -88,15 +93,23 @@ def build_sparsified_hierarchy(A, sparsify_on_stall=True, keep_frac=0.5,
             flag_iterative = True
             break
 
-        # (c) productive coarsening -> normal level  (fork replaces the
-        # production `nc >= n-1` stall guard with the aggressive stall_ratio)
-        if nc <= stall_ratio * n:
+        # (c) contract, then decide on the EDGE ratio, not the node ratio.
+        # The stall CMG cannot escape is DENSIFICATION: contraction fill (or an
+        # expander-like level) keeps ~as many edges even as nodes merge, so the
+        # coarse operator is no cheaper -- that is what balloons hierarchy depth
+        # and per-iteration cost, and what the sparsifier targets. A level is
+        # productive iff contraction actually reduces the edge count; node count
+        # can look productive (nc < n) while density, hence work, does not fall.
+        A_c = contract_coo(A, cI, nc)
+        m = nnz_lower(A) - n                       # lower-tri off-diagonals = edges
+        m_c = nnz_lower(A_c) - nc
+        if m == 0 or m_c <= stall_ratio * m:       # edges dropped enough
             level.R = _restriction(cI, nc, n)
             levels.append(level)
-            A = contract_coo(A, cI, nc)
+            A = A_c
             continue
 
-        # (d) STALL. inject a sparsifier level instead of giving up.
+        # (d) STALL: contraction did not reduce edges. inject a sparsifier.
         if sparsify_on_stall and injected < max_inject:
             e0 = edges_of(A)
             B = bundles + injected if bundles_growth else bundles
