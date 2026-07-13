@@ -123,6 +123,9 @@ is fixed to the corresponding null-space reference.
 - The preconditioner/solver closures reuse internal workspace across calls and
   are **not** reentrant or thread-safe; use one per thread.
 - `example/bench_kcycle.jl` compares the cycles on uniform and anisotropic grids.
+- This package and the Python sibling **pycmg** are a verified mirror pair; the
+  feature ledger (and the cmg++ extension roadmap) is `docs/PARITY.md` in the
+  CMG-python repository.
 
 ## Citation
 
